@@ -1,0 +1,452 @@
+.device-config-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgba(31, 35, 41, .03);
+}
+.device-meta {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  padding: 18px 22px;
+  background: #fafafa;
+  border-bottom: 1px solid var(--line);
+}
+.device-meta span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 7px; }
+.device-meta strong { font-size: 13px; }
+.inline-device-form { padding: 24px; }
+.inline-device-form .form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 16px;
+  row-gap: 18px;
+  align-items: start;
+}
+.inline-device-form label { display: grid; gap: 7px; min-width: 0; margin-bottom: 0; }
+.inline-device-form label > span { font-size: 13px; font-weight: 600; }
+.inline-device-form label:has(input[name="data_dir"]) {
+  grid-column: 1 / -1;
+}
+.inline-device-form label:has(input[name="init_arm_pose_duration"]),
+.inline-device-form label:has(input[name="ik_replay_live_fps"]) {
+  justify-self: start;
+  width: min(100%, 280px);
+}
+.inline-device-form input,
+.inline-device-form select {
+  width: 100%;
+  border: 1px solid #d7dae0;
+  border-radius: 5px;
+  padding: 9px 10px;
+  outline: 0;
+  background: #fff;
+}
+.inline-device-form small {
+  min-height: 16px;
+  line-height: 1.45;
+}
+.inline-device-form input:focus,
+.inline-device-form select:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, .12);
+}
+.config-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+.config-footer .switches {
+  flex-wrap: wrap;
+  row-gap: 10px;
+}
+.config-footer .switches label { margin-bottom: 0; }
+.bound-device {
+  margin-bottom: 18px;
+  padding: 11px 12px;
+  border-radius: 5px;
+  background: var(--blue-soft);
+  color: #4e5969;
+}
+@media (max-width: 900px) {
+  .device-meta { grid-template-columns: 1fr 1fr; }
+  .inline-device-form .form-grid { grid-template-columns: 1fr; }
+  .inline-device-form label:has(input[name="data_dir"]) { grid-column: auto; }
+}
+@media (max-width: 600px) {
+  .device-meta { grid-template-columns: 1fr; }
+  .config-footer { align-items: flex-start; gap: 20px; flex-direction: column; }
+}
+
+/* Dispatch-center dark theme */
+.device-config-card {
+  background: var(--panel);
+  border-color: #2b6798;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .2);
+}
+.device-meta {
+  background: #0b2036;
+  border-color: #2b6798;
+}
+.device-meta span { color: var(--muted); }
+.device-meta strong { color: #fff; }
+.inline-device-form label > span { color: #dff6ff; }
+.inline-device-form input,
+.inline-device-form select {
+  color: var(--text);
+  border-color: #2b6798;
+  background: #071626;
+}
+.inline-device-form input:focus,
+.inline-device-form select:focus {
+  border-color: #4ad8ff;
+  box-shadow: 0 0 0 2px rgba(74, 216, 255, .18);
+}
+.inline-device-form small { color: var(--muted); }
+.config-footer { border-color: #2b6798; }
+.config-footer .switches label { color: #d7f0ff; }
+.bound-device {
+  color: #d7f0ff;
+  background: rgba(53, 200, 255, .12);
+  border: 1px solid #2b6798;
+}
+
+/* Device management polish */
+#devicesView {
+  max-width: 1380px;
+}
+#devicesView .page-title {
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 0 2px 0 6px;
+}
+#devicesView .page-title h1 {
+  font-size: 24px;
+  letter-spacing: .2px;
+}
+#devicesView .page-title p {
+  margin-top: 8px;
+  color: #9fcce9;
+}
+.device-config-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, rgba(53, 200, 255, .10), rgba(53, 200, 255, 0) 36%),
+    linear-gradient(180deg, #102b46, #0b2036);
+}
+.device-config-card:before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-top: 1px solid rgba(100, 220, 255, .5);
+}
+.device-meta {
+  position: relative;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 18px;
+  background: rgba(7, 22, 38, .62);
+}
+.device-meta > div {
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid rgba(53, 200, 255, .24);
+  border-radius: 8px;
+  background: rgba(8, 27, 46, .82);
+}
+.device-meta span {
+  margin-bottom: 8px;
+  color: #8fb8d9;
+  letter-spacing: .2px;
+}
+.device-meta strong {
+  display: block;
+  min-height: 22px;
+  color: #f4fbff;
+  font-size: 14px;
+  line-height: 1.55;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-meta .status {
+  width: max-content;
+  min-height: 24px;
+  padding: 3px 10px;
+}
+.inline-device-form {
+  position: relative;
+  padding: 20px;
+}
+.inline-device-form .form-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  gap: 12px;
+}
+.inline-device-form label {
+  min-height: 98px;
+  padding: 12px;
+  border: 1px solid rgba(43, 103, 152, .78);
+  border-radius: 8px;
+  background: rgba(7, 22, 38, .62);
+}
+.inline-device-form label:hover {
+  border-color: rgba(74, 216, 255, .66);
+  background: rgba(12, 42, 68, .78);
+}
+.inline-device-form label > span {
+  color: #cfeeff;
+  font-size: 12px;
+  line-height: 1.2;
+}
+.inline-device-form input,
+.inline-device-form select {
+  height: 38px;
+  border-radius: 6px;
+  background: rgba(4, 14, 26, .92);
+}
+.inline-device-form input::placeholder {
+  color: #5f86a6;
+}
+.inline-device-form small {
+  min-height: auto;
+  color: #88b5d4;
+  font-size: 11px;
+}
+.inline-device-form label:has(input[name="data_dir"]),
+.inline-device-form label:has(input[name="init_arm_pose_file"]),
+.inline-device-form label:has(input[name="ik_replay_live_url"]) {
+  grid-column: span 2;
+}
+.inline-device-form label:has(input[name="img_server_ip"]),
+.inline-device-form label:has(input[name="webrtc_server_ip"]) {
+  grid-column: span 2;
+}
+.inline-device-form label:has(input[name="init_arm_pose_duration"]),
+.inline-device-form label:has(input[name="ik_replay_live_fps"]),
+.inline-device-form label:has(input[name="frequency"]) {
+  width: auto;
+  justify-self: stretch;
+}
+.config-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  margin: 18px -20px -20px;
+  padding: 14px 20px;
+  background: rgba(7, 22, 38, .96);
+  backdrop-filter: blur(8px);
+}
+.config-footer .switches {
+  gap: 10px;
+}
+.config-footer .switches label {
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(53, 200, 255, .28);
+  border-radius: 999px;
+  background: rgba(53, 200, 255, .08);
+  color: #d7f0ff;
+}
+.config-footer .switches input {
+  accent-color: #35c8ff;
+}
+.config-footer .primary {
+  min-width: 156px;
+  height: 38px;
+  border-radius: 7px;
+}
+@media (max-width: 1180px) {
+  .inline-device-form .form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 900px) {
+  .device-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .inline-device-form label:has(input[name="data_dir"]),
+  .inline-device-form label:has(input[name="init_arm_pose_file"]),
+  .inline-device-form label:has(input[name="ik_replay_live_url"]),
+  .inline-device-form label:has(input[name="img_server_ip"]),
+  .inline-device-form label:has(input[name="webrtc_server_ip"]) {
+    grid-column: auto;
+  }
+  .config-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .config-footer .primary {
+    width: 100%;
+  }
+}
+@media (max-width: 640px) {
+  .device-meta,
+  .inline-device-form .form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Device management clean pass */
+#devicesView {
+  max-width: none;
+}
+#devicesView .page-title {
+  margin-bottom: 18px;
+  padding: 0;
+}
+#devicesView .page-title h1 {
+  font-size: 22px;
+}
+#devicesView .page-title p {
+  margin-top: 6px;
+  color: #8fb8d9;
+}
+.device-config-card {
+  overflow: visible;
+  border-radius: 8px;
+  background: #102b46;
+  box-shadow: none;
+}
+.device-config-card:before {
+  display: none;
+}
+.device-meta {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  padding: 0;
+  background: #0b2036;
+}
+.device-meta > div {
+  padding: 16px 18px;
+  border: 0;
+  border-right: 1px solid #2b6798;
+  border-radius: 0;
+  background: transparent;
+}
+.device-meta > div:last-child {
+  border-right: 0;
+}
+.device-meta span {
+  margin-bottom: 8px;
+  color: #8fb8d9;
+}
+.device-meta strong {
+  min-height: 0;
+  font-size: 13px;
+}
+.inline-device-form {
+  padding: 22px 24px 18px;
+}
+.inline-device-form .form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 16px;
+  row-gap: 18px;
+}
+.inline-device-form label {
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.inline-device-form label:hover {
+  border-color: transparent;
+  background: transparent;
+}
+.inline-device-form label > span {
+  color: #dff6ff;
+  font-size: 13px;
+}
+.inline-device-form input,
+.inline-device-form select {
+  height: 40px;
+  border-color: #2b6798;
+  border-radius: 5px;
+  background: #071626;
+}
+.inline-device-form small {
+  color: #8fb8d9;
+  font-size: 11px;
+}
+.inline-device-form label:has(input[name="data_dir"]) {
+  grid-column: 1 / -1;
+}
+.inline-device-form label:has(input[name="init_arm_pose_file"]),
+.inline-device-form label:has(input[name="ik_replay_live_url"]),
+.inline-device-form label:has(input[name="img_server_ip"]),
+.inline-device-form label:has(input[name="webrtc_server_ip"]) {
+  grid-column: auto;
+}
+.inline-device-form label:has(input[name="init_arm_pose_duration"]),
+.inline-device-form label:has(input[name="ik_replay_live_fps"]) {
+  justify-self: start;
+  width: min(100%, 280px);
+}
+.config-footer {
+  position: static;
+  margin: 22px 0 0;
+  padding: 18px 0 0;
+  border-top: 1px solid #2b6798;
+  background: transparent;
+  backdrop-filter: none;
+}
+.config-footer .switches {
+  gap: 28px;
+  row-gap: 10px;
+}
+.config-footer .switches label {
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.config-footer .primary {
+  min-width: 148px;
+  height: auto;
+}
+@media (max-width: 900px) {
+  .device-meta {
+    grid-template-columns: 1fr 1fr;
+  }
+  .device-meta > div:nth-child(2n) {
+    border-right: 0;
+  }
+  .device-meta > div {
+    border-bottom: 1px solid #2b6798;
+  }
+  .device-meta > div:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+  .inline-device-form .form-grid {
+    grid-template-columns: 1fr;
+  }
+  .inline-device-form label:has(input[name="data_dir"]) {
+    grid-column: auto;
+  }
+  .config-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .config-footer .primary {
+    width: auto;
+  }
+}
+@media (max-width: 600px) {
+  .device-meta {
+    grid-template-columns: 1fr;
+  }
+  .device-meta > div {
+    border-right: 0;
+  }
+  .device-meta > div:nth-last-child(-n + 2) {
+    border-bottom: 1px solid #2b6798;
+  }
+  .device-meta > div:last-child {
+    border-bottom: 0;
+  }
+}

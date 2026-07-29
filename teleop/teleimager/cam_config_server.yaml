@@ -1,0 +1,74 @@
+# Capture configuration for the x86 camera box at 192.168.123.5.
+# Device mapping was inspected and frame-tested on 2026-06-22.
+
+head_camera:
+  enable_zmq: true
+  zmq_port: 55555
+  enable_webrtc: true
+  webrtc_port: 60001
+  webrtc_codec: h264
+  type: opencv
+  fourcc: YUYV
+  direct_video_id: true
+  usb_interface: "1.4"
+  video_index: 0
+  image_shape: [480, 640]
+  binocular: false
+  fps: 30
+  video_id: 22
+  serial_number: CP0BB53000FS
+  physical_path: /sys/devices/pci0000:00/0000:00:14.0/usb3/3-4/3-4:1.4
+
+torso_camera:
+  enable_zmq: true
+  zmq_port: 55556
+  enable_webrtc: true
+  webrtc_port: 60002
+  webrtc_codec: h264
+  type: opencv
+  fourcc: YUYV
+  direct_video_id: true
+  usb_interface: "1.4"
+  video_index: 0
+  image_shape: [480, 640]
+  binocular: false
+  fps: 30
+  video_id: 12
+  serial_number: CPCBC530002E
+  physical_path: /sys/devices/pci0000:00/0000:00:14.0/usb4/4-4/4-4:1.4
+
+left_wrist_camera:
+  enable_zmq: true
+  zmq_port: 55557
+  enable_webrtc: true
+  webrtc_port: 60003
+  webrtc_codec: h264
+  type: opencv
+  fourcc: YUYV
+  direct_video_id: true
+  usb_interface: "1.4"
+  video_index: 0
+  image_shape: [480, 640]
+  binocular: false
+  fps: 30
+  video_id: 6
+  serial_number: CP0BB530009R
+  physical_path: /sys/devices/pci0000:00/0000:00:14.0/usb3/3-3/3-3:1.4
+
+right_wrist_camera:
+  enable_zmq: true
+  zmq_port: 55558
+  enable_webrtc: true
+  webrtc_port: 60004
+  webrtc_codec: h264
+  type: opencv
+  fourcc: YUYV
+  direct_video_id: true
+  usb_interface: "1.0"
+  video_index: 4
+  image_shape: [480, 640]
+  binocular: false
+  fps: 30
+  video_id: 28
+  serial_number: 260523073107
+  physical_path: /sys/devices/pci0000:00/0000:00:14.0/usb4/4-2/4-2:1.0

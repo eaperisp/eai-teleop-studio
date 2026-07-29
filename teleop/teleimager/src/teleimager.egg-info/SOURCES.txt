@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+src/teleimager/__init__.py
+src/teleimager/image_client.py
+src/teleimager/image_server.py
+src/teleimager.egg-info/PKG-INFO
+src/teleimager.egg-info/SOURCES.txt
+src/teleimager.egg-info/dependency_links.txt
+src/teleimager.egg-info/entry_points.txt
+src/teleimager.egg-info/requires.txt
+src/teleimager.egg-info/top_level.txt

@@ -1,0 +1,22 @@
+[Unit]
+Description=XR Teleoperate Web Console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robot
+Group=robot
+WorkingDirectory=/home/robot/eai_teleoperate_studio
+Environment=HOME=/home/robot
+Environment=PYTHONUNBUFFERED=1
+Environment=XR_TELEOP_WEBRTC_SCHEME=https
+Environment=XR_TELEOP_PYTHON=/home/robot/miniconda3/envs/teleop/bin/python3
+Environment=PATH=/home/robot/miniconda3/envs/teleop/bin:/home/robot/miniconda3/condabin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/robot/miniconda3/envs/teleop/bin/python3 -m teleop_web.server --host 0.0.0.0 --port 18088 --dataset-dir /home/robot/eai_teleoperate_studio/data/datasets/robot --config /home/robot/eai_teleoperate_studio/config/web_console.json --task-file /home/robot/eai_teleoperate_studio/data/datasets/robot/tasks.json --log-dir /home/robot/eai_teleoperate_studio/logs
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

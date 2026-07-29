@@ -1,0 +1,11 @@
+LICENSE
+README.md
+pyproject.toml
+src/televuer/__init__.py
+src/televuer/televuer.py
+src/televuer/tv_wrapper.py
+src/televuer.egg-info/PKG-INFO
+src/televuer.egg-info/SOURCES.txt
+src/televuer.egg-info/dependency_links.txt
+src/televuer.egg-info/requires.txt
+src/televuer.egg-info/top_level.txt

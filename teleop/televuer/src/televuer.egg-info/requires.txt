@@ -1,0 +1,4 @@
+numpy<2.0.0
+opencv-python
+logging-mp
+vuer[all]==0.0.60

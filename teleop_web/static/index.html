@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>遥操数采平台</title>
+  <link rel="stylesheet" href="/styles.css?v=20260728-command-full-height">
+  <link rel="stylesheet" href="/device.css?v=20260713-device-clean">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="logo"><span class="robot-icon">XR</span><strong>数据采集平台</strong></div>
+    <nav>
+      <button class="nav-item active" data-view="devices"><span>⚙</span>设备管理</button>
+      <div class="nav-group"><span>▦</span>数据管理</div>
+      <button class="nav-item sub" data-view="tasks"><span>●</span>数据采集</button>
+      <button class="nav-item sub" data-view="dataList"><span>▤</span>数据列表</button>
+      <button class="nav-item sub" data-view="processing"><span>▣</span>数据处理</button>
+      <button class="nav-item sub" data-view="training"><span>▣</span>训练数据集</button>
+      <button class="nav-item sub" data-view="oss"><span>⇄</span>OSS 传输</button>
+    </nav>
+  </aside>
+  <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-label="收起菜单" title="收起菜单"><span></span></button>
+
+  <header class="topbar">
+    <span id="currentRuntime">当前无运行任务</span>
+    <div class="user"><span>admin</span><b>A</b></div>
+  </header>
+
+  <main class="content">
+    <div id="notice" class="notice" role="status"></div>
+
+    <section id="devicesView" class="view active">
+      <div class="page-title">
+        <div><h1>当前设备信息</h1><p>单机本地配置，保存后立即同步到配置文件</p></div>
+      </div>
+      <div class="device-config-card">
+        <div class="device-meta">
+          <div><span>设备 ID</span><strong id="currentDeviceId">保存配置后生成</strong></div>
+          <div><span>运行状态</span><strong id="currentDeviceStatus" class="status idle">未配置</strong></div>
+          <div><span>配置文件</span><strong id="configFileHint">本地 Python 配置</strong></div>
+          <div><span>更新时间</span><strong id="deviceUpdated">—</strong></div>
+        </div>
+        <form id="deviceForm" class="inline-device-form">
+          <div class="form-grid">
+            <label><span>设备名称</span><input name="name" placeholder="H2_数据采集" maxlength="64" required></label>
+            <label><span>机器人型号</span><select name="arm"><option>H2</option><option>G1_29</option><option>G1_23</option><option>H1_2</option><option>H1</option></select></label>
+            <label><span>左手末端执行器</span><select name="left_ee"><option value="none">不控制</option><option value="rubber">橡胶手</option><option>inspire_dfx</option><option>inspire_ftp</option><option>dex3</option><option>dex1</option><option>brainco</option></select><small id="eeHint">主动末端需要 hand 模式</small></label>
+            <label><span>右手末端执行器</span><select name="right_ee"><option value="none">不控制</option><option value="rubber">橡胶手</option><option>inspire_dfx</option><option>inspire_ftp</option><option>dex3</option><option>dex1</option><option>brainco</option></select><small>左右不同主动手目前仅支持单侧主动、另一侧被动</small></label>
+            <label><span>输入模式</span><select name="input_mode"><option value="controller">手柄 controller</option><option value="hand">手部追踪 hand</option></select></label>
+            <label><span>显示模式</span><select name="display_mode"><option value="immersive">沉浸 immersive</option><option value="ego">第一视角 ego</option><option value="pass-through">透视 pass-through</option></select></label>
+            <label><span>VR 相机视角</span><select name="xr_view"><option value="head">仅头部相机 head</option><option value="quad">四路摄像头 quad</option></select><small>手势模式建议使用 pass-through 和 head，避免四路相机遮挡视野</small></label>
+            <input name="arm_reference_mode" type="hidden" value="head_position">
+            <label><span>图像服务 IP（内部）</span><input name="img_server_ip" value="192.168.123.5" required><small>后台获取相机配置 / ZMQ 使用，按现场网络修改</small></label>
+            <label><span>WebRTC 服务 IP（浏览器可访问）</span><input name="webrtc_server_ip" placeholder="例如 192.168.61.142"></label>
+            <label><span>数据集目录</span><input name="data_dir" placeholder="~/data" required><small>系统会使用该目录下的 datasets/robot、datasets/lerobot、datasets/openpi</small></label>
+            <label><span>DDS 网络接口</span><input name="network_interface" placeholder="enp86s0" required></label>
+            <label><span>控制频率 Hz</span><input name="frequency" type="number" min="1" max="240" value="30" required></label>
+            <label><span>初始双臂姿态文件</span><input name="init_arm_pose_file" placeholder="config/h2_pose_init.json"><small>开始采集前移动到该姿态；留空则保持当前姿态</small></label>
+            <label><span>初始姿态移动时长 s</span><input name="init_arm_pose_duration" type="number" min="0.5" max="60" step="0.5" value="5"></label>
+            <label><span>IK 回放推送地址</span><input name="ik_replay_live_url" placeholder="http://192.168.61.228:8000/api/live/state"><small>仅开启 IK 跟随推送时使用</small></label>
+            <label><span>IK 回放推送频率 Hz</span><input name="ik_replay_live_fps" type="number" min="0.1" max="60" step="0.1" value="10"></label>
+          </div>
+          <div class="config-footer">
+            <div class="switches"><label><input name="headless" type="checkbox"> 无界面模式</label><label><input name="motion" type="checkbox" checked> 启用运动控制</label><label><input name="ik_replay_live_enable" type="checkbox"> IK 跟随推送</label></div>
+            <button class="primary" type="submit">保存设备配置</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <section id="tasksView" class="view">
+      <div class="page-title">
+        <div><h1>数据采集</h1><p>任务清单：<span id="taskFileHint">data/datasets/robot/tasks.json</span></p></div>
+        <button id="addTaskButton" class="primary">创建任务</button>
+      </div>
+      <div class="toolbar">
+        <select id="statusFilter"><option value="">全部状态</option><option>未开始</option><option>采集中</option><option>已暂停</option><option>已完成</option></select>
+        <div class="search">⌕<input id="taskSearch" placeholder="搜索任务名称"></div>
+        <button id="refreshTasks" class="plain">刷新</button>
+      </div>
+      <div class="table-card">
+        <table>
+          <thead><tr><th>任务 ID</th><th>任务名称</th><th>设备</th><th>数据采集进度</th><th>状态</th><th>数据格式</th><th>数据转换</th><th>归一化</th><th>创建时间</th><th>操作</th></tr></thead>
+          <tbody id="taskRows"></tbody>
+        </table>
+        <div id="taskEmpty" class="empty">暂无数采任务</div>
+      </div>
+      <div class="pagination" id="taskPagination">
+        <button id="prevTaskPage" class="plain" type="button">上一页</button>
+        <span id="taskPageInfo">第 1 / 1 页</span>
+        <button id="nextTaskPage" class="plain" type="button">下一页</button>
+      </div>
+    </section>
+    <section id="dataListView" class="view">
+      <div class="page-title">
+        <div><h1>数据列表</h1><p id="dataListSubtitle">查看每条 episode 的帧数、文件数、大小并执行预览/删除</p></div>
+        <button id="refreshDataList" class="primary" type="button">刷新</button>
+      </div>
+      <div class="toolbar">
+        <select id="dataListTaskSelect"></select>
+        <select id="dataListPageSize"><option value="50">每页 50 条</option><option value="100">每页 100 条</option><option value="200">每页 200 条</option></select>
+      </div>
+      <div class="table-card">
+        <table>
+          <thead><tr><th>episode ↑</th><th>任务</th><th>帧数</th><th>文件数</th><th>大小</th><th>写入状态</th><th>操作</th></tr></thead>
+          <tbody id="dataListRows"></tbody>
+        </table>
+        <div id="dataListEmpty" class="empty">暂无数据</div>
+      </div>
+      <div class="pagination" id="dataListPagination">
+        <button id="prevDataListPage" class="plain" type="button">上一页</button>
+        <span id="dataListPageInfo">第 1 / 1 页</span>
+        <button id="nextDataListPage" class="plain" type="button">下一页</button>
+      </div>
+    </section>
+    <section id="processingView" class="view">
+      <div class="page-title">
+        <div><h1>数据处理</h1><p>数据集画像、LeRobot 转换与 OpenPI 归一化</p></div>
+        <button id="refreshProcessing" class="primary" type="button">刷新</button>
+      </div>
+      <div class="training-panel processing-panel">
+        <div class="training-panel-head">
+          <div><h2>数据集画像与处理</h2><p>转换和归一化集中在这里执行，数据采集页只保留状态</p></div>
+        </div>
+        <div id="processingProfiles" class="processing-profile-list"></div>
+      </div>
+    </section>
+    <section id="trainingView" class="view">
+      <div class="page-title">
+        <div><h1>训练准备</h1><p>组合已转换的数据集，生成训练环境交接包</p></div>
+        <button id="refreshTraining" class="primary" type="button">刷新画像</button>
+      </div>
+      <div class="training-layout">
+        <div class="training-panel">
+          <div class="training-panel-head">
+            <div><h2>数据集画像</h2><p>按任务目录保留数据，训练集只引用 LeRobot repo</p></div>
+          </div>
+          <div id="trainingProfiles" class="training-profile-list"></div>
+        </div>
+        <div class="training-panel">
+          <div class="training-panel-head">
+            <div><h2>创建训练集</h2><p>多任务要求动作维度和相机 schema 一致</p></div>
+          </div>
+          <form id="trainingSetForm" class="training-form">
+            <label><span>训练集名称</span><input name="name" placeholder="h2_switch_bidirectional" required></label>
+            <label><span>OpenPI config-name</span><input name="config_name" placeholder="pi05_h2_switch_bidirectional" required></label>
+            <label class="short"><span>模型动作维度 ACTION_DIM</span><input name="action_dim" type="number" min="1" value="32" required><small>OpenPI/VLA 模型使用的动作维度，默认 32。</small></label>
+            <label class="short"><span>真实动作维度 REAL_ACTION_DIM</span><input name="real_action_dim" type="number" min="1" value="14" required><small>LeRobot 数据集中真实 action 维度，按任务确认。</small></label>
+            <label class="short"><span>预测动作帧数 ACTION_HORIZON</span><input name="action_horizon" type="number" min="1" value="16" required><small>模型一次预测的动作帧数，默认 16。</small></label>
+            <details class="training-env-fields">
+              <summary>训练环境路径</summary>
+              <div>
+                <label><span>训练环境 LeRobot 根目录</span><input name="h200_dataset_root" value="/home/ubuntu/datasets/lerobot" required><small>对应训练环境的 HF_LEROBOT_HOME。</small></label>
+                <label><span>训练环境 assets 根目录</span><input name="h200_assets_root" value="/home/ubuntu/assets" required><small>用于归一化 assets 和训练交接包。</small></label>
+              </div>
+            </details>
+            <label class="wide"><span>说明</span><textarea name="description" rows="3" placeholder="例如：开关远端到近端 + 近端到远端"></textarea></label>
+            <div class="dialog-actions"><button class="primary" type="submit">创建训练集</button></div>
+          </form>
+        </div>
+      </div>
+      <div class="training-panel">
+        <div class="training-panel-head">
+          <div><h2>训练集与训练交接包</h2><p id="trainingRootHint">—</p></div>
+        </div>
+        <div id="trainingSets" class="training-set-list"></div>
+      </div>
+    </section>
+    <section id="ossView" class="view">
+      <div class="page-title">
+        <div><h1>OSS 传输</h1><p>上传本地压缩包到训练环境，或从 OSS 回拉训练后的模型文件</p></div>
+        <button id="refreshOssTransfer" class="primary" type="button">刷新</button>
+      </div>
+      <div class="training-panel oss-page-panel">
+        <div class="training-panel-head">
+          <div><h2>数据上传与模型回拉</h2><p>本地压缩包来自数据处理/训练交接包；OSS 列表只在手动刷新时请求</p></div>
+        </div>
+        <div id="ossTransferPanel" class="oss-transfer-panel"></div>
+      </div>
+    </section>
+  </main>
+
+  <div id="taskModal" class="modal" aria-hidden="true">
+    <div class="dialog">
+      <div class="dialog-head"><div><h2>创建数采任务</h2><p>英文任务名会作为数据集目录名称</p></div><button class="close" data-close="taskModal">×</button></div>
+      <form id="taskForm">
+        <div class="bound-device">当前设备：<strong id="taskDeviceName">尚未配置</strong></div>
+        <label><span>英文任务名</span><input name="name" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}" placeholder="h2_pick_red_cup" required><small>仅支持字母、数字、下划线和连字符</small></label>
+        <label><span>英文 instruction</span><textarea name="instruction" rows="3" maxlength="500" placeholder="Pick up the red cup and place it on the tray." required></textarea><small>用于 VLA/OpenPI 训练与推理调用</small></label>
+        <label><span>中文任务描述</span><textarea name="description" rows="4" maxlength="500" placeholder="将红色水杯从桌面左侧移动到托盘中" required></textarea></label>
+        <label><span>目标采集条数</span><input name="target_episodes" type="number" min="1" max="10000" value="10" required></label>
+        <div class="dialog-actions"><button type="button" class="cancel" data-close="taskModal">取消</button><button class="primary" type="submit">创建任务</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="controlModal" class="modal" aria-hidden="true">
+    <div class="dialog control-dialog">
+      <div class="dialog-head"><div><h2 id="controlTitle">数采控制</h2><p id="controlSubtitle">等待遥操进程启动</p></div><button class="close" data-close="controlModal">×</button></div>
+      <div class="control-summary">
+        <div><span>进程状态</span><strong id="processStatus">初始化中</strong></div>
+        <div><span>采集进度</span><strong id="episodeProgress">0 / 0</strong></div>
+        <div><span>进程 PID</span><strong id="pidText">—</strong></div>
+      </div>
+      <div class="task-detail-grid" id="taskDetailPanel"></div>
+      <div class="control-actions">
+        <button id="startControl" class="success" disabled>开始遥操</button>
+        <button id="recordControl" class="warning" disabled>开始录制</button>
+        <button id="stopControl" class="danger" disabled>结束遥操</button>
+      </div>
+      <div class="camera-panel">
+        <div class="camera-panel-head"><span>相机预览</span><small id="cameraPreviewHint">开始采集后显示 WebRTC 相机流</small></div>
+        <div id="cameraPreviewGrid" class="camera-grid"></div>
+      </div>
+      <div class="command"><span>启动命令</span><code id="commandText">—</code></div>
+      <details><summary>运行日志</summary><pre id="logOutput">暂无日志</pre></details>
+      <p class="control-tip">结束一条后可再次开始录制；安全停止后，下次会从该任务继续，不覆盖已有数据。</p>
+    </div>
+  </div>
+
+  <div id="dataPreviewModal" class="modal" aria-hidden="true">
+    <div class="dialog data-preview-dialog">
+      <div class="dialog-head">
+        <div><h2 id="dataPreviewTitle">数据预览</h2><p id="dataPreviewSubtitle">读取任务数据摘要</p></div>
+        <button class="close" data-close="dataPreviewModal">×</button>
+      </div>
+      <div class="data-preview-summary" id="dataPreviewSummary"></div>
+      <div class="data-preview-list" id="dataPreviewList"></div>
+    </div>
+  </div>
+
+  <div id="postprocessModal" class="modal" aria-hidden="true">
+    <div class="dialog postprocess-dialog">
+      <div class="dialog-head">
+        <div><h2 id="postprocessTitle">数据转换与归一化</h2><p id="postprocessSubtitle">将原始 episode 转为 LeRobot，并计算 OpenPI norm stats</p></div>
+        <button class="close" data-close="postprocessModal">×</button>
+      </div>
+      <form id="postprocessForm">
+        <input name="task_id" type="hidden">
+        <div class="postprocess-grid">
+          <label><span>LeRobot repo-id</span><input name="repo_id" placeholder="local/h2_pick_red_cup_01" required></label>
+          <label><span>robot_type</span><input name="robot_type" value="robot" required></label>
+          <div class="wide camera-slot-config"><span>OpenPI 三路相机</span><div class="camera-slot-grid"><label><span>头部 image</span><select name="camera_head"><option value="color_0">color_0</option><option value="color_1">color_1</option><option value="color_2">color_2</option><option value="color_3">color_3</option><option value="none">none 黑图补全</option></select></label><label><span>左手 left_wrist_image</span><select name="camera_left"><option value="color_0">color_0</option><option value="color_1" selected>color_1</option><option value="color_2">color_2</option><option value="color_3">color_3</option><option value="none">none 黑图补全</option></select></label><label><span>右手 right_wrist_image</span><select name="camera_right"><option value="color_0">color_0</option><option value="color_1">color_1</option><option value="color_2" selected>color_2</option><option value="color_3">color_3</option><option value="none">none 黑图补全</option></select></label></div><small id="cameraMapHint">默认：头部=color_0，左手=color_1，右手=color_2；none 表示该路用黑图补全。</small></div>
+          <label><span>image-size</span><select name="image_size"><option value="original">原始尺寸</option><option value="240x320">240x320</option></select><small id="imageSizeHint">默认保持原始尺寸</small></label>
+          <label><span>图像编码 image-encoding</span><select name="image_encoding"><option value="auto">自动：跟随原始格式</option><option value="jpg">JPG/JPEG</option><option value="png">PNG</option></select><small id="imageEncodingHint">原始 JPG 则保存 JPG；原始 PNG 则保存 PNG</small></label>
+          <label><span>JPEG 质量 jpeg-quality</span><input name="jpeg_quality" type="number" min="1" max="100" value="95"><small>仅 JPG/JPEG 生效，默认 95</small></label>
+          <label><span>OpenPI config-name</span><input name="config_name" placeholder="pi05_<任务名>" required><small>用于 OpenPI 归一化配置</small></label>
+          <label><span>OpenPI 目录</span><input name="openpi_dir" placeholder="~/openpi" required><small>OpenPI 项目所在目录</small></label>
+          <label><span>转换起始 episode</span><input name="start_episode" type="number" min="0" placeholder="默认 0；断点续转自动计算"><small>留空自动从 0 或断点位置开始</small></label>
+          <label><span>batch-size 每批条数</span><input name="batch_size" type="number" min="1" placeholder="留空单批全量；填写后自动逐批转完"><small>建议大数据集使用 20-50</small></label>
+          <label><span>max_frames 可选</span><input name="max_frames" type="number" min="1" placeholder="留空表示全量"><small>仅归一化抽样时使用</small></label>
+          <label class="checkbox-line"><input name="resume" type="checkbox"> 断点续转（自动回滚最近 2 条再转换）</label>
+          <label class="checkbox-line"><input name="overwrite" type="checkbox" checked> 覆盖同名 LeRobot 数据集</label>
+        </div>
+        <div class="dialog-actions"><button type="button" class="cancel" data-close="postprocessModal">关闭</button><button id="normalizeButton" type="button" class="plain">计算归一化</button><button class="primary" type="submit">转换为 LeRobot</button></div>
+      </form>
+      <div class="dialog-actions postprocess-extra-actions"><button id="packageAssetsButton" type="button" class="plain">打包压缩归一化</button><button id="packageButton" type="button" class="plain">打包压缩数据</button></div>
+      <div class="postprocess-jobs">
+        <div class="camera-panel-head"><span>处理记录</span><small id="postprocessJobHint">暂无运行任务</small></div>
+        <div id="postprocessJobList" class="postprocess-job-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=20260728-training-linkage" defer></script>
+</body>
+</html>

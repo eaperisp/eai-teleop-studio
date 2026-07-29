@@ -1,0 +1,37 @@
+{
+  "robot": "unitree_h2",
+  "type": "dual_arm_qpos",
+  "joint_names": [
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint"
+  ],
+  "qpos": [
+    0.10952623188495636,
+    0.3681314289569855,
+    -0.278471440076828,
+    1.134456753730774,
+    0.001342233270406723,
+    0.03591672331094742,
+    -0.01489639189094305,
+    0.1253262311220169,
+    -0.4265305697917938,
+    0.4008723497390747,
+    1.0288277864456177,
+    -0.0071066454984247684,
+    0.014405039139091969,
+    0.0005512743955478072
+  ],
+  "created_at": "2026-07-02T13:50:47+0800"
+}

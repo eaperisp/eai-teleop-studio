@@ -1,0 +1,10 @@
+logging_mp
+opencv-python
+numpy<2,>=1.21
+pyyaml
+pyzmq
+
+[server]
+aiohttp
+aiortc
+pupil-labs-uvc

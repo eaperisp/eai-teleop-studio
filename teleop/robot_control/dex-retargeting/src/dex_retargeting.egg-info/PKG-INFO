@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: dex_retargeting
+Version: 0.4.7
+Summary: Hand pose retargeting for dexterous robot hand. Modified by [silencht@qq.com]
+Author-email: Yuzhe Qin <y1qin@ucsd.edu>
+License: MIT
+Project-URL: Homepage, https://github.com/dexsuite/dex-retargeting
+Requires-Python: <3.13,>=3.10
+License-File: LICENSE
+Requires-Dist: numpy<2.0.0
+Requires-Dist: torch==2.3.0
+Requires-Dist: pytransform3d>=3.5.0
+Requires-Dist: pin>=2.7.0
+Requires-Dist: nlopt<2.8.0,>=2.6.1
+Requires-Dist: trimesh>=4.4.0
+Requires-Dist: anytree>=2.12.0
+Requires-Dist: pyyaml>=6.0.0
+Requires-Dist: lxml>=5.2.2
+Dynamic: license-file
