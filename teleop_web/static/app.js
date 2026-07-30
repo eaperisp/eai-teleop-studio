@@ -1093,6 +1093,25 @@ function renderOssTransfer() {
     <section class="oss-card wide"><div class="oss-card-head"><div><h3>传输任务记录</h3><p>保留历史 OSS 上传和模型下载任务，运行中任务显示当前进度</p></div></div><div class="oss-job-list">${jobRows}</div></section>
   </div>`;
 }
+async function refreshOssLocalDir(directory, {notice = false} = {}) {
+  const result = await api('/api/oss/local-packages', {directory});
+  appState.oss_transfer = result;
+  ossTransferState.localDir = result.local_dir || directory || '';
+  if (notice) showNotice(`已打开目录：${ossTransferState.localDir}`, 'success');
+  renderOssTransfer();
+  return result;
+}
+async function ensureOssTaskLocalDir() {
+  if (activeView !== 'oss') return;
+  const taskName = cleanTaskName($('#ossTaskNameInput')?.value || ossTransferState.taskName || ossTaskOptions()[0] || DEFAULT_OSS_TASK_NAME);
+  const expectedDir = joinLocalPath(DEFAULT_OSS_PACKAGE_ROOT, taskName);
+  const currentDir = appState.oss_transfer?.local_dir || '';
+  if (currentDir !== expectedDir) {
+    ossTransferState.taskName = taskName;
+    ossTransferState.localDir = expectedDir;
+    await refreshOssLocalDir(expectedDir);
+  }
+}
 function renderTraining() {
   renderTrainingSets();
 }
@@ -1108,6 +1127,7 @@ function renderOssView() {
   if (panelTitle) panelTitle.textContent = '数据上传与模型回拉';
   if (panelSubtitle) panelSubtitle.textContent = '本地压缩包来自数据处理/训练交接包；OSS 列表只在手动刷新时请求';
   renderOssTransfer();
+  ensureOssTaskLocalDir().catch(error => showNotice(error.message));
 }
 function renderDataPreview(preview, episodeName = '') {
   const episodes = preview?.episodes || [];
@@ -1928,6 +1948,7 @@ document.addEventListener('change', event => {
     ossTransferState.remoteUri = joinOssPath($('#ossRootInput')?.value || DEFAULT_OSS_ROOT, taskName);
     ossTransferState.remoteEntries = [];
     renderOssTransfer();
+    refreshOssLocalDir(ossTransferState.localDir).catch(error => showNotice(error.message));
   }
   if (event.target?.id === 'ossRootInput') {
     const taskName = cleanTaskName($('#ossTaskNameInput')?.value || ossTransferState.taskName);
@@ -2408,11 +2429,7 @@ document.addEventListener('click', async event => {
     button.disabled = true;
     button.textContent = '打开中...';
     try {
-      const result = await api('/api/oss/local-packages', {directory});
-      appState.oss_transfer = result;
-      ossTransferState.localDir = result.local_dir || directory || '';
-      renderOssTransfer();
-      showNotice(`已打开目录：${ossTransferState.localDir}`, 'success');
+      await refreshOssLocalDir(directory, {notice: true});
     } catch(e) {
       showNotice(e.message);
     } finally {

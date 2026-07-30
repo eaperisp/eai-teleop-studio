@@ -400,10 +400,10 @@ tbody tr:hover{background:#123452}
 }
 .processing-profile-row{
   display:grid;
-  grid-template-columns:28px minmax(180px,1fr) 72px 150px 150px 86px 92px minmax(160px,.9fr) minmax(170px,1fr) 120px;
+  grid-template-columns:28px minmax(220px,1.2fr) 72px 150px 150px 78px 84px minmax(140px,.75fr) minmax(140px,.85fr) 178px;
   gap:8px;
   align-items:center;
-  min-width:1410px;
+  min-width:1430px;
   min-height:48px;
   padding:7px 9px;
   border-top:1px solid #1d456b;
@@ -472,6 +472,11 @@ tbody tr:hover{background:#123452}
   display:flex;
   justify-content:flex-end;
   gap:6px;
+  overflow:visible!important;
+  white-space:nowrap!important;
+}
+.processing-row-actions .action{
+  white-space:nowrap;
 }
 .training-profile-row{
   display:grid;

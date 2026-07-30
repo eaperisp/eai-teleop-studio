@@ -5053,7 +5053,14 @@ class TeleopManager:
                     "openpi_config_name": DEFAULT_OPENPI_CONFIG_NAME,
                 },
                 "training": training_state,
-                "oss_transfer": self.oss_local_packages(),
+                "oss_transfer": {
+                    "oss_root": self.oss_root,
+                    "model_download_dir": str(self.model_download_dir),
+                    "local_dir": "",
+                    "local_parent": "",
+                    "local_entries": [],
+                    "packages": [],
+                },
                 "delivery": self.delivery_templates(),
                 "camera_preview": self.camera_preview() if running else {"cameras": [], "error": None},
             }
