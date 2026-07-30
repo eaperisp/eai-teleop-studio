@@ -1,0 +1,70 @@
+{
+  "version": 5,
+  "updated_at": "2026-07-30T15:32:06+0800",
+  "templates": [
+    {
+      "id": "proxy_pull_dataset",
+      "section": "data_upload",
+      "title": "代理机：从 OSS 拉取数据包",
+      "description": "在代理中转服务器执行，目录不存在会自动创建。",
+      "body": "TASK_NAME='{{TASK_NAME}}'\nDATA_FILE='{{DATA_PACKAGE}}'\nOSS_URI='{{DATA_OSS_URI}}'\n\nmkdir -p \"/opt/packages/openpi/${TASK_NAME}\"\nossutil cp -r \"$OSS_URI\" \"/opt/packages/openpi/${TASK_NAME}/\"\nchown robot:robot -R \"/opt/packages/openpi/${TASK_NAME}/\"\n"
+    },
+    {
+      "id": "sync_dataset_to_train",
+      "section": "data_upload",
+      "title": "训练服务器：同步数据包到训练服务器",
+      "description": "在代理中转服务器执行，将压缩包发送到训练服务器。",
+      "body": "TASK_NAME='{{TASK_NAME}}'\nDATA_FILE='{{DATA_PACKAGE}}'\nAGENT_HOST='172.20.1.3'\nUSER_NAME=robot\n\nmkdir -p /home/ubuntu/packages/openpi/${TASK_NAME}\nscp \"$USER_NAME@$AGENT_HOST:/opt/packages/openpi/${TASK_NAME}/$DATA_FILE\" \"/home/ubuntu/packages/openpi/${TASK_NAME}/\"\n"
+    },
+    {
+      "id": "extract_dataset_on_train",
+      "section": "data_upload",
+      "title": "训练服务器：解压 LeRobot 数据集",
+      "description": "在训练服务器执行，解压到 HF_LEROBOT_HOME 对应目录。",
+      "body": "TASK_NAME='{{TASK_NAME}}'\nDATA_FILE='{{DATA_PACKAGE}}'\nREPO_ID=\"{{REPO_ID}}\"\n\nmkdir -p \"/home/ubuntu/datasets/lerobot\"\nrm -rf \"/home/ubuntu/datasets/lerobot/${REPO_ID}\"\ntar -zxvf \"/home/ubuntu/packages/openpi/${TASK_NAME}/$DATA_FILE\" \\\n  -C \"/home/ubuntu/datasets/lerobot\"\n"
+    },
+    {
+      "id": "tmux_session",
+      "section": "training",
+      "title": "训练服务器：创建 tmux 会话",
+      "description": "训练建议放在 tmux 内执行，网络断开不影响训练进程。",
+      "body": "tmux new -s openpi\ntmux ls\ntmux attach -t openpi\n\n# 退出并删除会话：在 tmux 内执行 exit\n"
+    },
+    {
+      "id": "run_training",
+      "section": "training",
+      "title": "训练服务器：启动训练",
+      "description": "在训练服务器 tmux 会话内执行。",
+      "body": "cd \"/home/ubuntu/openpi\"\n\n\nenv \\\n  UV_NO_SYNC=1 \\\n  HF_LEROBOT_HOME=\"/home/ubuntu/datasets/lerobot\" \\\n  OPENPI_DATA_HOME=\"/home/ubuntu/models/openpi\" \\\n  HF_HOME=\"/home/ubuntu/models/openpi/huggingface\" \\\n  OPENPI_H2_REPO_ID=\"{{REPO_ID}}\" \\\n  OPENPI_H2_ACTION_DIM=\"{{ACTION_DIM}}\" \\\n  OPENPI_H2_REAL_ACTION_DIM=\"{{REAL_ACTION_DIM}}\" \\\n  OPENPI_H2_ACTION_HORIZON=\"{{ACTION_HORIZON}}\" \\\n  XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 \\\n  XLA_FLAGS=\"--xla_gpu_enable_triton_gemm=false --xla_gpu_autotune_level=0\" \\\n  uv run scripts/train.py \\\n    \"{{CONFIG_NAME}}\" \\\n    --exp-name \"{{EXP_NAME}}\" \\\n    --assets-base-dir \"/home/ubuntu/assets\" \\\n    --checkpoint-base-dir \"/home/ubuntu/models/openpi/checkpoints\" \\\n    --fsdp-devices \"{{FSDP_DEVICES}}\" \\\n    --batch-size \"{{BATCH_SIZE}}\" \\\n    --num-train-steps \"{{NUM_TRAIN_STEPS}}\" \\\n    --save-interval \"{{SAVE_INTERVAL}}\" \\\n    --keep-period \"{{KEEP_PERIOD}}\" \\\n    --overwrite \\\n    --no-wandb-enabled \\\n  2>&1 | tee -a \"/home/ubuntu/models/openpi/logs/{{EXP_NAME}}_{{PACKAGE_TIMESTAMP}}.log\" 2>&1\n"
+    },
+    {
+      "id": "package_model_to_oss",
+      "section": "model_return",
+      "title": "训练服务器：打包并上传模型",
+      "description": "训练完成后执行，将模型压缩包上传到 OSS 任务目录。",
+      "body": "TASK_NAME='{{TASK_NAME}}'\nMODEL_FILE='{{MODEL_FILE}}'\nAGENT_HOST='172.20.1.3'\nUSER_NAME=robot\n\nmkdir -p /home/ubuntu/packages/openpi/${TASK_NAME}/models\n\ntar -czvf \"/home/ubuntu/packages/openpi/${TASK_NAME}/models/$MODEL_FILE\" \\\n  -C \"/home/ubuntu/models/openpi/checkpoints/{{CONFIG_NAME}}/{{EXP_NAME}}/{{MODEL_TRAIN_DIR}}\" \"_CHECKPOINT_METADATA\" \"assets\" \"params\"\n\nscp \"/home/ubuntu/packages/openpi/${TASK_NAME}/models/$MODEL_FILE\" \"$USER_NAME@$AGENT_HOST:/opt/packages/openpi/${TASK_NAME}/$DATA_FILE\"\n"
+    },
+    {
+      "id": "proxy_pull_model",
+      "section": "model_return",
+      "title": "代理机：上传模型文件到OSS",
+      "description": "在代理中转服务器执行，文件名填写训练完成后上传到 OSS 的模型包。",
+      "body": "TASK_NAME='{{TASK_NAME}}'\nMODEL_FILE='{{MODEL_FILE}}'\nOSS_URI='{{MODEL_OSS_URI}}'\n\nossutil cp \"/opt/packages/openpi/${TASK_NAME}/$MODEL_FILE\" \"$OSS_URI\"\n"
+    },
+    {
+      "id": "sync_model_to_target",
+      "section": "model_deploy",
+      "title": "推理服务器：同步模型到部署服务器",
+      "description": "在推理服务器执行，目标服务器按实际部署环境修改。",
+      "body": "TASK_NAME='{{TASK_NAME}}'\nMODEL_FILE='{{MODEL_FILE}}'\nTARGET_HOST='robot@192.168.61.228'\nTARGET_DIR='/data03/data/models/openpi_downloads/${TASK_NAME}'\n\nmkdir -p \"/data03/models/openpi/checkpoints/{{CONFIG_NAME}}/${TASK_NAME}/{{NUM_TRAIN_STEPS}}\"\ntar -zxvf \"/data03/data/models/openpi_downloads/${TASK_NAME}/{{MODEL_FILE}}\" \\\n -C \"/data03/models/openpi/checkpoints/{{CONFIG_NAME}}/${TASK_NAME}/{{NUM_TRAIN_STEPS}}\"\n"
+    },
+    {
+      "id": "custom_1785394830691",
+      "section": "model_deploy",
+      "title": "推理服务器：模型部署",
+      "description": "在推理服务器上部署VLA大模型",
+      "body": "# 在这里编写命令模板\n# 可使用 {{TASK_NAME}}、{{INSTRUCTION}}、{{REPO_ID}}、{{DATA_PACKAGE}} 等变量\ncd /data02/app/openpi\n\nexport OPENPI_CKPT=\"/data03/models/openpi/checkpoints/{{CONFIG_NAME}}/${TASK_NAME}/{{NUM_TRAIN_STEPS}}\"\nexport DEFAULT_PROMPT=${DEFAULT_PROMPT:-{{INSTRUCTION}}}\nexport OPENPI_ROOT=/data02/app/openpi\nexport OPENPI_CONFIG=\"{{CONFIG_NAME}}\"\nexport OPENPI_REPO_ID=\"{{REPO_ID}}\"\nexport OPENPI_H2_REPO_ID=\"{{REPO_ID}}\"\nexport OPENPI_H2_ACTION_DIM=\"{{ACTION_DIM}}\"\nexport OPENPI_H2_REAL_ACTION_DIM=\"{{REAL_ACTION_DIM}}\"\nexport OPENPI_H2_ACTION_HORIZON=\"{{ACTION_HORIZON}}\"\n\ncd /data02/app/openpi && nohup ./scripts/deploy/run_pi05_h2_server.sh > logs/h2_openpi_server.log 2>&1 &\n"
+    }
+  ]
+}
+

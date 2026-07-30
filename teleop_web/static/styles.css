@@ -1024,6 +1024,9 @@ tbody tr:hover{background:#123452}
 .oss-transfer-grid .wide{
   grid-column:span 2;
 }
+.oss-task-dir-grid{
+  grid-template-columns:minmax(360px,1.45fr) minmax(260px,.95fr) minmax(220px,.8fr) minmax(300px,1fr);
+}
 .model-download-grid{
   grid-template-columns:minmax(320px,1fr) minmax(260px,.9fr) auto;
 }
@@ -1116,8 +1119,10 @@ tbody tr:hover{background:#123452}
 .manual-doc-form label{display:grid;gap:6px;min-width:0}
 .manual-doc-form span{color:#9fd8ff;font-size:12px;font-weight:700}
 .manual-doc-form input,
+.manual-doc-form select,
 .template-editor-meta input,
 .template-editor-meta select{height:38px;border:1px solid #256895;border-radius:6px;padding:0 10px;background:#061522;color:#fff}
+.manual-doc-form select option{background:#061522;color:#fff}
 .manual-doc-actions{display:flex;justify-content:flex-end;padding:0 14px 14px}
 .manual-advanced-panel{grid-column:1/-1;margin:0 14px 14px;border:1px solid #163a58;border-radius:8px;background:#071827;overflow:hidden}
 .manual-advanced-panel summary{border-bottom:0}
@@ -1142,7 +1147,7 @@ tbody tr:hover{background:#123452}
 .manual-command-copy{position:absolute;top:10px;right:10px;z-index:2}
 .manual-command-copy button{height:28px;border:1px solid #2d78ad;border-radius:6px;padding:0 10px;background:#0e2e4c;color:#bfeeff;font-size:12px}
 .manual-command-copy button:hover{background:#15446f;color:#fff}
-.manual-command pre{margin:0;padding:16px 18px;max-height:none;overflow:visible;color:#d6f6ff;background:#030b13;font-size:12px;line-height:1.7;white-space:pre;font-family:"JetBrains Mono","Cascadia Mono","SFMono-Regular",Consolas,monospace}
+.manual-command pre{margin:0;padding:16px 18px;max-height:none!important;overflow:visible!important;color:#d6f6ff;background:#030b13;font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"JetBrains Mono","Cascadia Mono","SFMono-Regular",Consolas,monospace}
 .manual-command code{font-family:inherit}
 @media(max-width:900px){
   .oss-transfer-grid{

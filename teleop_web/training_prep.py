@@ -73,6 +73,10 @@ def _atomic_json(path: Path, payload: Any) -> None:
     tmp.replace(path)
 
 
+def training_data_root(data_dir: Path) -> Path:
+    return data_dir / "datasets" / "training"
+
+
 def _task_key(task: dict[str, Any]) -> str:
     return str(task.get("id") or task.get("name") or "")
 
@@ -105,10 +109,25 @@ class TrainingPrepManager:
         self.dataset_root = dataset_root
         self.lerobot_home = lerobot_home
         self.openpi_assets_dir = openpi_assets_dir
-        self.training_root = data_dir / "training"
+        self.training_root = training_data_root(data_dir)
+        legacy_root = data_dir / "training"
+        if not self.training_root.exists() and legacy_root.is_dir():
+            self.training_root.parent.mkdir(parents=True, exist_ok=True)
+            for child in legacy_root.iterdir():
+                target = self.training_root / child.name
+                if target.exists():
+                    continue
+                if child.is_dir():
+                    import shutil
+                    shutil.copytree(child, target)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(child.read_bytes())
+        self.training_root.mkdir(parents=True, exist_ok=True)
         self.training_sets_file = self.training_root / "training_sets.json"
         self.packages_file = self.training_root / "training_packages.json"
         self.package_root = self.training_root / "packages"
+        self.package_root.mkdir(parents=True, exist_ok=True)
 
     def _load_sets(self) -> list[dict[str, Any]]:
         payload = _read_json(self.training_sets_file, {"training_sets": []})

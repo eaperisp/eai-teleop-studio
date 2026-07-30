@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from teleop_web.server import TeleopManager, ValidationError, build_command, episode_progress, validate_device, validate_task
+from teleop_web.server import PROJECT_ROOT, TeleopManager, ValidationError, build_command, episode_progress, validate_device, validate_task
 
 
 class ValidationTests(unittest.TestCase):
@@ -54,6 +54,25 @@ class ValidationTests(unittest.TestCase):
     def test_invalid_xr_view_is_rejected(self):
         with self.assertRaises(ValidationError):
             validate_device({"xr_view": "wrist_only"})
+
+    def test_h2_init_pose_defaults_to_project_relative_path(self):
+        device = validate_device({"arm": "H2", "input_mode": "controller", "ee": "none"})
+        self.assertEqual(device["init_arm_pose_file"], "config/h2_pose_init.json")
+
+    def test_project_relative_init_pose_expands_for_runtime_command(self):
+        device = validate_device({
+            "arm": "H2",
+            "input_mode": "controller",
+            "ee": "none",
+            "init_arm_pose_file": "config/h2_pose_init.json",
+        })
+        task = validate_task({
+            "name": "relative_pose",
+            "instruction": "Move to init pose",
+            "description": "鐩稿璺緞",
+        })
+        command = build_command(device, task, Path("/tmp/datasets"))
+        self.assertIn(f"--init-arm-pose-file={PROJECT_ROOT / 'config' / 'h2_pose_init.json'}", command)
 
     def test_controller_mode_rejects_end_effector(self):
         with self.assertRaises(ValidationError):
@@ -293,6 +312,7 @@ class ValidationTests(unittest.TestCase):
             manager = TeleopManager(root / "datasets", root / "console.json", log_dir=root / "logs")
             manager.logger.write("info", "unit test log", command="python teleop_hand_and_arm.py --record")
             log_file = manager.logger._path_for_today()
+            self.assertEqual(log_file.parent, root / "logs" / "system")
             content = log_file.read_text(encoding="utf-8")
         self.assertIn("unit test log", content)
         self.assertIn("python teleop_hand_and_arm.py --record", content)

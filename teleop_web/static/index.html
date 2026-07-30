@@ -243,7 +243,7 @@
           <label><span>robot_type</span><input name="robot_type" value="robot" required></label>
           <div class="wide camera-slot-config"><span>OpenPI 三路相机</span><div class="camera-slot-grid"><label><span>头部 image</span><select name="camera_head"><option value="color_0">color_0</option><option value="color_1">color_1</option><option value="color_2">color_2</option><option value="color_3">color_3</option><option value="none">none 黑图补全</option></select></label><label><span>左手 left_wrist_image</span><select name="camera_left"><option value="color_0">color_0</option><option value="color_1" selected>color_1</option><option value="color_2">color_2</option><option value="color_3">color_3</option><option value="none">none 黑图补全</option></select></label><label><span>右手 right_wrist_image</span><select name="camera_right"><option value="color_0">color_0</option><option value="color_1">color_1</option><option value="color_2" selected>color_2</option><option value="color_3">color_3</option><option value="none">none 黑图补全</option></select></label></div><small id="cameraMapHint">默认：头部=color_0，左手=color_1，右手=color_2；none 表示该路用黑图补全。</small></div>
           <label><span>image-size</span><select name="image_size"><option value="original">原始尺寸</option><option value="240x320">240x320</option></select><small id="imageSizeHint">默认保持原始尺寸</small></label>
-          <label><span>图像编码 image-encoding</span><select name="image_encoding"><option value="auto">自动：跟随原始格式</option><option value="jpg">JPG/JPEG</option><option value="png">PNG</option></select><small id="imageEncodingHint">原始 JPG 则保存 JPG；原始 PNG 则保存 PNG</small></label>
+          <label><span>图像/视频格式 image-encoding</span><select name="image_encoding"><option value="auto">自动：跟随原始格式</option><option value="jpg">JPG/JPEG</option><option value="png">PNG</option><option value="video">Video MP4</option></select><small id="imageEncodingHint">原始 JPG 则保存 JPG；原始 PNG 则保存 PNG；Video 生成 LeRobot mp4</small></label>
           <label><span>JPEG 质量 jpeg-quality</span><input name="jpeg_quality" type="number" min="1" max="100" value="95"><small>仅 JPG/JPEG 生效，默认 95</small></label>
           <label><span>OpenPI config-name</span><input name="config_name" placeholder="pi05_<任务名>" required><small>用于 OpenPI 归一化配置</small></label>
           <label><span>OpenPI 目录</span><input name="openpi_dir" placeholder="~/openpi" required><small>OpenPI 项目所在目录</small></label>
@@ -257,12 +257,12 @@
       </form>
       <div class="dialog-actions postprocess-extra-actions"><button id="packageAssetsButton" type="button" class="plain">打包压缩归一化</button><button id="packageButton" type="button" class="plain">打包压缩数据</button></div>
       <div class="postprocess-jobs">
-        <div class="camera-panel-head"><span>处理记录</span><small id="postprocessJobHint">暂无运行任务</small></div>
+        <div class="camera-panel-head"><span>转换记录</span><small id="postprocessJobHint">暂无运行任务</small></div>
         <div id="postprocessJobList" class="postprocess-job-list"></div>
       </div>
     </div>
   </div>
 
-  <script src="/app.js?v=20260728-training-linkage" defer></script>
+  <script src="/app.js?v=20260730-oss-task-dir" defer></script>
 </body>
 </html>

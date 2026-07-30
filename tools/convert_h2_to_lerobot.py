@@ -174,9 +174,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--image-encoding",
-        choices=("auto", "jpg", "jpeg", "png"),
+        choices=("auto", "jpg", "jpeg", "png", "video"),
         default="auto",
-        help="Encoding used by LeRobot's image writer. 'auto' follows source metadata extension: jpg/jpeg stays jpg, png stays png.",
+        help=(
+            "Visual storage format. 'auto' follows source metadata extension: jpg/jpeg stays jpg, "
+            "png stays png. 'video' stores visual modalities as LeRobot mp4 videos."
+        ),
+    )
+    parser.add_argument(
+        "--video-backend",
+        default=None,
+        help="Optional LeRobot video backend/codec. Leave empty to use LeRobot's safe default.",
     )
     parser.add_argument(
         "--jpeg-quality",
@@ -331,8 +339,8 @@ def normalize_image_encoding(value: str) -> str:
     normalized = str(value or "auto").strip().lower()
     if normalized == "jpeg":
         return "jpg"
-    if normalized not in {"auto", "jpg", "png"}:
-        raise ValueError("--image-encoding must be auto, jpg, jpeg, or png.")
+    if normalized not in {"auto", "jpg", "png", "video"}:
+        raise ValueError("--image-encoding must be auto, jpg, jpeg, png, or video.")
     return normalized
 
 
@@ -963,6 +971,7 @@ def image_features(
     camera_plan: dict[str, str | None],
     default_shape: tuple[int, int, int],
     image_size: tuple[int, int] | None,
+    visual_dtype: str = "image",
 ) -> dict[str, dict[str, Any]]:
     features: dict[str, dict[str, Any]] = {}
     colors = frame.get("colors") or {}
@@ -970,7 +979,7 @@ def image_features(
         rel_path = colors.get(source_key) if source_key else None
         image = read_rgb(episode_dir / rel_path, image_size) if rel_path else np.zeros(default_shape, dtype=np.uint8)
         features[target_key] = {
-            "dtype": "image",
+            "dtype": visual_dtype,
             "shape": tuple(image.shape),
             "names": ["height", "width", "channel"],
         }
@@ -1002,6 +1011,8 @@ def write_metadata(
     joint_limits: dict[str, dict[str, float]],
     image_encoding: str,
     image_encoding_counts: dict[str, int],
+    visual_storage: str,
+    video_backend: str | None,
     trim_report: dict[str, Any] | None = None,
 ) -> None:
     joint_names: list[str] = []
@@ -1019,9 +1030,15 @@ def write_metadata(
         "image_size": "original" if image_size is None else f"{image_size[0]}x{image_size[1]}",
         "image_encoding": image_encoding,
         "requested_image_encoding": normalize_image_encoding(args.image_encoding),
+        "visual_storage": visual_storage,
+        "video_backend": video_backend,
         "source_image_encoding_counts": image_encoding_counts,
         "jpeg_quality": int(args.jpeg_quality) if image_encoding == "jpg" else None,
-        "external_images": "kept" if args.keep_external_images else "removed_after_parquet_save",
+        "external_images": (
+            "encoded_to_videos_by_lerobot"
+            if visual_storage == "video"
+            else ("kept" if args.keep_external_images else "removed_after_parquet_save")
+        ),
         "camera_plan": camera_plan,
         "camera_preset": camera_preset,
         "resume": bool(args.resume),
@@ -1123,12 +1140,16 @@ def main() -> int:
     )
     requested_image_encoding = normalize_image_encoding(args.image_encoding)
     inferred_image_encoding, image_encoding_counts = infer_source_image_encoding(schema_episodes, camera_plan)
+    visual_storage = "video" if requested_image_encoding == "video" else "image"
     image_encoding = inferred_image_encoding if requested_image_encoding == "auto" else requested_image_encoding
-    try:
-        configure_lerobot_image_encoding(image_encoding, args.jpeg_quality)
-    except (RuntimeError, ValueError) as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
+    if visual_storage == "video":
+        image_encoding = "video"
+    else:
+        try:
+            configure_lerobot_image_encoding(image_encoding, args.jpeg_quality)
+        except (RuntimeError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     source_image_shape = infer_image_shape(schema_episodes, sample_frame, sample_episode_dir)
     if image_size is not None and (image_size[0] > source_image_shape[0] or image_size[1] > source_image_shape[1]):
         print(
@@ -1142,7 +1163,14 @@ def main() -> int:
         if image_size is not None
         else source_image_shape
     )
-    img_features = image_features(sample_episode_dir, sample_frame, camera_plan, output_image_shape, image_size)
+    img_features = image_features(
+        sample_episode_dir,
+        sample_frame,
+        camera_plan,
+        output_image_shape,
+        image_size,
+        visual_dtype="video" if visual_storage == "video" else "image",
+    )
     image_shapes = {key: tuple(value["shape"]) for key, value in img_features.items()}
     fps = infer_fps([payload for _, payload in schema_episodes])
 
@@ -1153,7 +1181,8 @@ def main() -> int:
     print(f"Camera preset: {camera_preset}")
     print(f"Camera plan: {camera_plan}")
     print(
-        "Image encoding: "
+        "Visual storage: "
+        f"{visual_storage}; image encoding: "
         f"{image_encoding} (requested={requested_image_encoding}, "
         f"source jpg={image_encoding_counts['jpg']}, png={image_encoding_counts['png']}, "
         f"jpeg_quality={args.jpeg_quality if image_encoding == 'jpg' else '-'})"
@@ -1257,6 +1286,11 @@ def main() -> int:
     }
     if "root" in inspect.signature(LeRobotDataset.create).parameters:
         create_kwargs["root"] = output_path
+    create_parameters = inspect.signature(LeRobotDataset.create).parameters
+    if "use_videos" in create_parameters:
+        create_kwargs["use_videos"] = visual_storage == "video"
+    if visual_storage == "video" and args.video_backend and "video_backend" in create_parameters:
+        create_kwargs["video_backend"] = args.video_backend
 
     total_episodes = len(episodes)
     current_index = start_index
@@ -1353,6 +1387,8 @@ def main() -> int:
             joint_limits=joint_limits,
             image_encoding=image_encoding,
             image_encoding_counts=image_encoding_counts,
+            visual_storage=visual_storage,
+            video_backend=args.video_backend,
             trim_report=trim_report,
         )
         if trim_report.get("enabled"):
@@ -1385,6 +1421,8 @@ def main() -> int:
         joint_limits=joint_limits,
         image_encoding=image_encoding,
         image_encoding_counts=image_encoding_counts,
+        visual_storage=visual_storage,
+        video_backend=args.video_backend,
         trim_report=trim_report,
     )
     if trim_report.get("enabled"):

@@ -39,7 +39,7 @@ from teleop.robot_control.end_effectors import (
     SINGLE_SIDE_ACTIVE_END_EFFECTORS,
     canonical_end_effector,
 )
-from teleop_web.training_prep import TrainingPrepError, TrainingPrepManager
+from teleop_web.training_prep import TrainingPrepError, TrainingPrepManager, training_data_root
 
 try:
     from PIL import Image
@@ -84,6 +84,7 @@ DEFAULT_OPENPI_ASSETS_DIR = DEFAULT_OPENPI_WORK_DIR / "assets"
 DEFAULT_OPENPI_CONFIG_NAME = os.environ.get("XR_TELEOP_OPENPI_CONFIG_NAME", "pi05_h2_lerobot")
 DEFAULT_CONFIG_FILE = default_project_path("XR_TELEOP_WEB_CONFIG", "config", "web_console.json")
 DEFAULT_LOG_DIR = default_project_path("XR_TELEOP_WEB_LOG_DIR", "logs")
+DEFAULT_DELIVERY_TEMPLATES_FILE = PROJECT_ROOT / "config" / "delivery_templates.json"
 
 
 DEFAULT_DELIVERY_TEMPLATES: dict[str, Any] = {
@@ -219,6 +220,16 @@ scp "/opt/packages/openpi/${TASK_NAME}/models/$MODEL_FILE" "$TARGET_HOST:$TARGET
     ],
 }
 
+
+def default_delivery_templates_payload() -> dict[str, Any]:
+    try:
+        payload = json.loads(DEFAULT_DELIVERY_TEMPLATES_FILE.read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("templates"), list):
+            return payload
+    except (OSError, json.JSONDecodeError):
+        pass
+    return DEFAULT_DELIVERY_TEMPLATES
+
 POSTPROCESS_TASK_KEYS = {
     "postprocess_repo_id",
     "postprocess_robot_type",
@@ -267,6 +278,7 @@ POSTPROCESS_STDOUT_DRAIN_SECONDS = 5.0
 POSTPROCESS_TERMINATE_GRACE_SECONDS = 3.0
 POSTPROCESS_INTERRUPTION_GRACE_SECONDS = 20.0
 POSTPROCESS_JOB_LOG_LIMIT = 200
+POSTPROCESS_STORE_RECENT_LIMIT = 120
 POSTPROCESS_PROGRESS_RE = re.compile(r"(\d{1,3})%\|")
 POSTPROCESS_RATIO_RE = re.compile(r"\|\s*(\d+)\s*/\s*(\d+)\s*\[")
 POSTPROCESS_STAGE_RE = re.compile(r"^([^:]{2,64}):\s*")
@@ -301,7 +313,7 @@ DEFAULT_OPENPI_PYTHON = os.environ.get("XR_TELEOP_OPENPI_PYTHON", "").strip()
 DEFAULT_NETWORK_INTERFACE = os.environ.get("XR_TELEOP_DEFAULT_NETWORK_INTERFACE", "enp86s0").strip() or "enp86s0"
 DEFAULT_H2_INIT_ARM_POSE_FILE = os.environ.get(
     "XR_TELEOP_DEFAULT_H2_INIT_ARM_POSE_FILE",
-    str(PROJECT_ROOT / "config" / "h2_pose_init.json"),
+    "config/h2_pose_init.json",
 ).strip()
 DEFAULT_IK_REPLAY_LIVE_URL = os.environ.get(
     "IK_REPLAY_LIVE_URL",
@@ -345,7 +357,7 @@ class DailyFileLogger:
         self._lock = threading.RLock()
 
     def _path_for_today(self) -> Path:
-        return self.log_dir / f"teleop_{time.strftime('%Y-%m-%d')}.log"
+        return self.log_dir / "system" / f"teleop_{time.strftime('%Y-%m-%d')}.log"
 
     def write(self, level: str, message: str, **fields: Any) -> None:
         with self._lock:
@@ -358,8 +370,9 @@ class DailyFileLogger:
                     extra = f" {fields}"
             line = f"{timestamp} [{level.upper()}] {message}{extra}\n"
             try:
-                self.log_dir.mkdir(parents=True, exist_ok=True)
-                with self._path_for_today().open("a", encoding="utf-8") as log_file:
+                path = self._path_for_today()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as log_file:
                     log_file.write(line)
             except OSError as exc:
                 print(f"{timestamp} [WARNING] failed to write log file {self._path_for_today()}: {exc}")
@@ -380,6 +393,23 @@ def _english_instruction(value: Any) -> str:
     if not instruction.isascii():
         raise ValidationError("英文 instruction 仅支持英文、数字、空格和常用英文标点")
     return instruction
+
+
+def _project_path_for_runtime(value: str) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return (PROJECT_ROOT / path).resolve()
+
+
+def _project_path_for_config(value: str) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        return value
+    try:
+        return path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except (OSError, ValueError):
+        return str(path)
 
 
 def validate_device(raw: Any) -> dict[str, Any]:
@@ -452,7 +482,7 @@ def validate_device(raw: Any) -> dict[str, Any]:
         raise ValidationError("初始姿态文件路径不正确")
     if not init_pose_file and device.get("arm") == "H2":
         init_pose_file = DEFAULT_H2_INIT_ARM_POSE_FILE
-    device["init_arm_pose_file"] = init_pose_file
+    device["init_arm_pose_file"] = _project_path_for_config(init_pose_file) if init_pose_file else ""
     try:
         init_pose_duration = float(device.get("init_arm_pose_duration", 5))
     except (TypeError, ValueError) as exc:
@@ -577,7 +607,7 @@ def build_command(device: dict[str, Any], task: dict[str, str], dataset_root: Pa
         command.append(f"--webrtc-server-ip={device['webrtc_server_ip']}")
     command.append(f"--webrtc-scheme={DEFAULT_WEBRTC_SCHEME}")
     if device.get("init_arm_pose_file"):
-        command.append(f"--init-arm-pose-file={device['init_arm_pose_file']}")
+        command.append(f"--init-arm-pose-file={_project_path_for_runtime(str(device['init_arm_pose_file']))}")
         command.append(f"--init-arm-pose-duration={device.get('init_arm_pose_duration', 5):g}")
     if device["headless"]:
         command.append("--headless")
@@ -748,9 +778,9 @@ def validate_image_encoding(value: Any) -> str:
         return "jpg"
     if text in {"", "auto"}:
         return "auto"
-    if text in {"jpg", "png"}:
+    if text in {"jpg", "png", "video"}:
         return text
-    raise ValidationError("image-encoding 仅支持 auto、jpg/jpeg 或 png")
+    raise ValidationError("image-encoding 仅支持 auto、jpg/jpeg、png 或 video")
 
 
 def validate_jpeg_quality(value: Any) -> int:
@@ -883,15 +913,8 @@ def episode_progress(task_dir: Path) -> dict[str, Any]:
             match = re.fullmatch(r"episode_(\d+)", child.name)
             if child.is_dir() and match:
                 episode_ids.append(int(match.group(1)))
-                data_file = child / "data.json"
-                try:
-                    with data_file.open("rb") as handle:
-                        handle.seek(max(0, data_file.stat().st_size - 16))
-                        tail = handle.read().replace(b"\r\n", b"\n").rstrip()
-                        if tail.endswith(b"]\n}"):
-                            completed += 1
-                except OSError:
-                    pass
+                if _is_completed_data_json(child / "data.json"):
+                    completed += 1
     # EpisodeWriter starts at 0001 when the task directory already exists.
     last_id = max(episode_ids, default=0)
     return {
@@ -907,7 +930,7 @@ def _is_completed_data_json(data_file: Path) -> bool:
         with data_file.open("rb") as handle:
             handle.seek(max(0, data_file.stat().st_size - 16))
             tail = handle.read().replace(b"\r\n", b"\n").rstrip()
-            return tail.endswith(b"]\n}")
+            return tail.endswith(b"]\n}") or tail.endswith(b"]}")
     except OSError:
         return False
 
@@ -1243,7 +1266,8 @@ class TeleopManager:
         self.openpi_work_dir = self.data_dir / "datasets" / "openpi"
         self.openpi_assets_dir = self.openpi_work_dir / "assets"
         self.cache_root = self.data_dir / "datasets" / "cache"
-        self.delivery_templates_file = self.data_dir / "training" / "delivery_templates.json"
+        self.delivery_templates_file = DEFAULT_DELIVERY_TEMPLATES_FILE
+        self.legacy_delivery_templates_file = training_data_root(self.data_dir) / "delivery_templates.json"
         self.oss_root = os.environ.get("XR_TELEOP_OSS_ROOT", "oss://bwton-idc/openpi").rstrip("/")
         self.model_download_dir = Path(os.environ.get("XR_TELEOP_MODEL_DOWNLOAD_DIR", self.data_dir / "models" / "openpi_downloads")).expanduser()
         self.training_prep = TrainingPrepManager(
@@ -1299,7 +1323,8 @@ class TeleopManager:
         self.openpi_work_dir = root / "datasets" / "openpi"
         self.openpi_assets_dir = self.openpi_work_dir / "assets"
         self.cache_root = root / "datasets" / "cache"
-        self.delivery_templates_file = root / "training" / "delivery_templates.json"
+        self.delivery_templates_file = DEFAULT_DELIVERY_TEMPLATES_FILE
+        self.legacy_delivery_templates_file = training_data_root(root) / "delivery_templates.json"
         self.model_download_dir = Path(os.environ.get("XR_TELEOP_MODEL_DOWNLOAD_DIR", root / "models" / "openpi_downloads")).expanduser()
         if hasattr(self, "_episode_progress_cache"):
             self._episode_progress_cache.clear()
@@ -1484,8 +1509,9 @@ class TeleopManager:
             env[key] = str(path)
 
     def delivery_templates(self) -> dict[str, Any]:
-        default_payload = json.loads(json.dumps(DEFAULT_DELIVERY_TEMPLATES, ensure_ascii=False))
+        default_payload = json.loads(json.dumps(default_delivery_templates_payload(), ensure_ascii=False))
         path = self.delivery_templates_file
+        self._migrate_legacy_delivery_templates(path)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(payload, dict) and isinstance(payload.get("templates"), list):
@@ -1502,9 +1528,38 @@ class TeleopManager:
         default_payload["path"] = str(path)
         return default_payload
 
+    def _migrate_legacy_delivery_templates(self, target: Path) -> None:
+        legacy = getattr(self, "legacy_delivery_templates_file", None)
+        if not isinstance(legacy, Path) or legacy == target or not legacy.is_file():
+            return
+        try:
+            payload = json.loads(legacy.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or not isinstance(payload.get("templates"), list):
+                return
+            should_copy = not target.is_file() or legacy.stat().st_mtime > target.stat().st_mtime
+            if not should_copy:
+                return
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(legacy, target)
+            self.logger.write(
+                "info",
+                "migrated legacy delivery templates to config",
+                legacy_path=str(legacy),
+                target_path=str(target),
+            )
+        except (OSError, json.JSONDecodeError):
+            return
+
     def _upgrade_delivery_templates(self, payload: dict[str, Any]) -> dict[str, Any]:
         version = int(payload.get("version") or 1)
         changed = False
+        for item in payload.get("templates") or []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "")
+            if item.get("section") == "training" and ("模型部署" in title or title.startswith("推理服务器：同步模型")):
+                item["section"] = "model_deploy"
+                changed = True
         if version < 2:
             removable_lines = {
                 'mkdir -p "{{LOG_DIR}}"',
@@ -1616,13 +1671,15 @@ class TeleopManager:
         if not isinstance(templates, list):
             raise ValidationError("模板内容为空或格式不正确")
         normalized: list[dict[str, str]] = []
-        allowed_sections = {"data_upload", "training", "model_return"}
+        allowed_sections = {"data_upload", "training", "model_return", "model_deploy"}
         for index, item in enumerate(templates, start=1):
             if not isinstance(item, dict):
                 raise ValidationError(f"第 {index} 个模板格式不正确")
             template_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(item.get("id") or f"template_{index}")).strip("_")
             section = str(item.get("section") or "training").strip()
             title = str(item.get("title") or "").strip()
+            if section == "training" and "模型部署" in title:
+                section = "model_deploy"
             body = str(item.get("body") or "").replace("\r\n", "\n").strip()
             if not title:
                 raise ValidationError(f"第 {index} 个模板缺少标题")
@@ -1647,7 +1704,7 @@ class TeleopManager:
         return {"delivery": self.delivery_templates(), "state": self.state()}
 
     def reset_delivery_templates(self) -> dict[str, Any]:
-        payload = json.loads(json.dumps(DEFAULT_DELIVERY_TEMPLATES, ensure_ascii=False))
+        payload = json.loads(json.dumps(default_delivery_templates_payload(), ensure_ascii=False))
         payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         self.delivery_templates_file.parent.mkdir(parents=True, exist_ok=True)
         self._atomic_json(self.delivery_templates_file, payload)
@@ -1670,7 +1727,7 @@ class TeleopManager:
     def _local_package_roots(self) -> list[Path]:
         roots = [
             self.lerobot_home / "packages",
-            self.training_prep.package_root if hasattr(self, "training_prep") else self.data_dir / "training" / "packages",
+            self.training_prep.package_root if hasattr(self, "training_prep") else training_data_root(self.data_dir) / "packages",
         ]
         unique: list[Path] = []
         for root in roots:
@@ -1846,6 +1903,32 @@ class TeleopManager:
         target_dir.mkdir(parents=True, exist_ok=True)
         command = ["ossutil", "cp", source, str(target_dir)]
         task_name = source.rstrip("/").rsplit("/", 1)[-1]
+        target_file = target_dir / task_name
+        if target_file.is_file():
+            timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            return self._record_completed_postprocess_job(
+                kind="oss_download",
+                task_id=None,
+                task_name=task_name,
+                command=command,
+                metadata={
+                    "repo_id": None,
+                    "oss_uri": source,
+                    "local_path": str(target_file),
+                    "progress": {
+                        "stage": "本地文件已存在，跳过下载",
+                        "percent": 100,
+                        "current": None,
+                        "total": None,
+                        "speed": "",
+                        "updated_at": timestamp,
+                    },
+                },
+                logs=[
+                    f"local file already exists, skip download: {target_file}",
+                    f"oss uri: {source}",
+                ],
+            )
         return self._start_postprocess_job(
             kind="oss_download",
             task_id=None,
@@ -1876,10 +1959,12 @@ class TeleopManager:
         except (OSError, json.JSONDecodeError, ValueError):
             saved = {"device": None}
 
+        task_file_loaded = False
         try:
             task_saved = json.loads(self.task_file.read_text(encoding="utf-8"))
             if not isinstance(task_saved, dict):
                 raise ValueError
+            task_file_loaded = True
         except (OSError, json.JSONDecodeError, ValueError):
             task_saved = {
                 "tasks": saved.get("tasks", []),
@@ -1936,15 +2021,64 @@ class TeleopManager:
         task_saved.setdefault("next_task_id", 1)
         # Old combined files are migrated once, then contain device data only.
         if "tasks" in saved or "next_task_id" in saved:
-            task_saved["tasks"] = saved.pop("tasks", task_saved["tasks"])
-            task_saved["next_task_id"] = saved.pop("next_task_id", task_saved["next_task_id"])
+            legacy_tasks = saved.pop("tasks", [])
+            legacy_next_id = saved.pop("next_task_id", None)
+            if isinstance(legacy_tasks, list):
+                task_saved["tasks"] = self._merge_task_lists(
+                    task_saved["tasks"] if task_file_loaded else [],
+                    legacy_tasks,
+                )
+            if legacy_next_id is not None and not task_file_loaded:
+                task_saved["next_task_id"] = legacy_next_id
             self._save_store({**saved, **task_saved})
         store = {**saved, **task_saved}
+        corrected_next_id = self._next_task_id(store.get("tasks", []), store.get("next_task_id", 1))
+        if corrected_next_id != store.get("next_task_id"):
+            store["next_task_id"] = corrected_next_id
+            self._save_tasks(store)
         if self._merge_task_postprocess_state(store):
             self._save_tasks(store)
         if self._migrate_inline_postprocess_logs(store):
             self._save_tasks(store)
         return store
+
+    @staticmethod
+    def _next_task_id(tasks: Any, current: Any = 1) -> int:
+        try:
+            next_id = int(current)
+        except (TypeError, ValueError):
+            next_id = 1
+        if isinstance(tasks, list):
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                try:
+                    next_id = max(next_id, int(task.get("id") or 0) + 1)
+                except (TypeError, ValueError):
+                    continue
+        return max(1, next_id)
+
+    @staticmethod
+    def _merge_task_lists(primary: Any, secondary: Any) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def key_for(task: dict[str, Any]) -> str:
+            name = str(task.get("name") or "").strip()
+            return f"name:{name}" if name else f"id:{task.get('id')}"
+
+        for source in (primary, secondary):
+            if not isinstance(source, list):
+                continue
+            for task in source:
+                if not isinstance(task, dict):
+                    continue
+                key = key_for(task)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(dict(task))
+        return merged
 
     def _save_store(self, store: dict[str, Any]) -> None:
         self._atomic_json(self.config_file, {"device": store.get("device")})
@@ -2047,9 +2181,15 @@ class TeleopManager:
     def _save_tasks(self, store: dict[str, Any]) -> None:
         tasks = store.get("tasks", [])
         self._extract_task_postprocess_state(tasks if isinstance(tasks, list) else [])
+        if self.task_file.is_file():
+            try:
+                backup = self.task_file.with_name(f"{self.task_file.name}.bak")
+                shutil.copy2(self.task_file, backup)
+            except OSError:
+                pass
         self._atomic_json(self.task_file, {
             "tasks": [self._task_without_postprocess_state(task) for task in store.get("tasks", [])],
-            "next_task_id": store.get("next_task_id", 1),
+            "next_task_id": self._next_task_id(store.get("tasks", []), store.get("next_task_id", 1)),
         })
 
     def _migrate_inline_postprocess_logs(self, store: dict[str, Any]) -> bool:
@@ -2122,6 +2262,10 @@ class TeleopManager:
         return changed
 
     @staticmethod
+    def _job_sort_time(job: dict[str, Any]) -> str:
+        return str(job.get("started_at") or job.get("updated_at") or job.get("finished_at") or "")
+
+    @staticmethod
     def _compact_postprocess_jobs(jobs: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         latest: dict[tuple[Any, Any], tuple[str, dict[str, Any]]] = {}
         keep_unkeyed: dict[str, Any] = {}
@@ -2131,7 +2275,7 @@ class TeleopManager:
             normalized_id = str(job.get("id") or job_id)
             key_target = job.get("task_id") or job.get("repo_id") or job.get("task_name")
             kind = job.get("kind")
-            if kind in {"oss_upload", "oss_download"}:
+            if job.get("running"):
                 keep_unkeyed[normalized_id] = job
                 continue
             if not kind or not key_target:
@@ -2140,12 +2284,19 @@ class TeleopManager:
             key = (kind, key_target)
             current = latest.get(key)
             current_job = current[1] if current else {}
-            current_time = current_job.get("started_at") or current_job.get("updated_at") or ""
-            job_time = job.get("started_at") or job.get("updated_at") or ""
+            current_time = TeleopManager._job_sort_time(current_job)
+            job_time = TeleopManager._job_sort_time(job)
             if current is None or job_time >= current_time:
                 latest[key] = (normalized_id, job)
         compacted = {job_id: job for job_id, job in keep_unkeyed.items()}
         compacted.update({job_id: job for job_id, job in latest.values()})
+        if len(compacted) > POSTPROCESS_STORE_RECENT_LIMIT:
+            ordered = sorted(
+                compacted.items(),
+                key=lambda item: (bool((item[1] or {}).get("running")), TeleopManager._job_sort_time(item[1] if isinstance(item[1], dict) else {})),
+                reverse=True,
+            )
+            compacted = dict(ordered[:POSTPROCESS_STORE_RECENT_LIMIT])
         return compacted, len(compacted) != len(jobs) or set(compacted) != {str(key) for key in jobs}
 
     def _save_postprocess_job(self, job: dict[str, Any]) -> None:
@@ -2179,7 +2330,11 @@ class TeleopManager:
         if existing:
             return Path(existing)
         task_name = self._safe_log_name(job.get("task_name") or job.get("repo_id"), fallback="postprocess")
-        return self.log_dir / f"{task_name}.log"
+        started_at = str(job.get("started_at") or time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+        date_part = started_at[:10] if re.match(r"\d{4}-\d{2}-\d{2}", started_at) else time.strftime("%Y-%m-%d")
+        kind = self._safe_log_name(job.get("kind"), fallback="job")
+        job_id = self._safe_log_name(job.get("id"), fallback=time.strftime("%H%M%S"))
+        return self.log_dir / "tasks" / task_name / date_part / f"{kind}_{job_id}.log"
 
     def _append_lines_to_postprocess_log_file(self, path: Path, lines: Iterable[Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2963,6 +3118,52 @@ class TeleopManager:
         except (TypeError, ValueError):
             exit_code = None
         return exit_code in {-signal.SIGTERM, -signal.SIGKILL} or record.get("status") == "cancelled"
+
+    def _record_completed_postprocess_job(
+        self,
+        *,
+        kind: str,
+        task_id: int | None,
+        task_name: str,
+        command: list[str],
+        metadata: dict[str, Any] | None = None,
+        logs: Iterable[Any] = (),
+    ) -> dict[str, Any]:
+        job_id = uuid.uuid4().hex[:10]
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        job = {
+            "id": job_id,
+            "kind": kind,
+            "task_id": task_id,
+            "task_name": task_name,
+            "pid": None,
+            "pgid": None,
+            "running": False,
+            "exit_code": 0,
+            "started_at": timestamp,
+            "finished_at": timestamp,
+            "command": display_command(command),
+            "log_path": "",
+            "logs": deque([str(line) for line in logs], maxlen=POSTPROCESS_JOB_LOG_LIMIT),
+            "progress": {},
+            "error": None,
+        }
+        if metadata:
+            job.update(metadata)
+        job["log_path"] = str(self._postprocess_log_path_for_job(job))
+        self._append_postprocess_log_header(job)
+        self._append_lines_to_postprocess_log_file(Path(str(job["log_path"])), job.get("logs") or [])
+        self._save_postprocess_job(job)
+        self.logger.write(
+            "info",
+            "recorded completed postprocess job",
+            job_id=job_id,
+            kind=kind,
+            task_id=task_id,
+            task_name=task_name,
+            command=job["command"],
+        )
+        return self.state()
 
     def _start_postprocess_job(
         self,
@@ -4373,6 +4574,10 @@ class TeleopManager:
             tasks = []
             task_file_changed = False
             running_postprocess_jobs = self._running_postprocess_jobs()
+            running_dataset_jobs = [
+                job for job in running_postprocess_jobs
+                if job.get("kind") in {"convert", "normalize", "package", "package_assets"}
+            ]
             for item in store["tasks"]:
                 task_dir = self.dataset_root / item["name"]
                 progress = self._episode_progress_cached(task_dir)
@@ -4672,7 +4877,7 @@ class TeleopManager:
                     "assets_package_exit_code": item.get("assets_package_exit_code"),
                     "last_assets_package_record": last_assets_package_record,
                     "last_assets_package": latest_assets_package,
-                    "postprocess_busy": bool(running_postprocess_jobs),
+                    "postprocess_busy": bool(running_dataset_jobs),
                 }
                 for key, value in (
                     ("completed_episodes", count),
@@ -4806,6 +5011,7 @@ class TeleopManager:
                     training_set["last_normalize_record"] = enriched
                 add_latest_postprocess_job(training_set.get("last_normalize_record"))
             postprocess_jobs.sort(key=lambda item: item.get("started_at") or item.get("updated_at") or "", reverse=True)
+            postprocess_jobs = postprocess_jobs[:POSTPROCESS_STORE_RECENT_LIMIT]
             return {
                 "process": {
                     "running": running,
@@ -5080,6 +5286,8 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _log_access(self, method: str, path: str, started: float, *, error: str | None = None) -> None:
         status = int(getattr(self, "_last_status", HTTPStatus.OK))
+        if method == "GET" and path == "/api/state" and status < 400 and not error:
+            return
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         level = "error" if status >= 500 else "warning" if status >= 400 else "access"
         fields: dict[str, Any] = {

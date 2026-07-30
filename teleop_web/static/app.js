@@ -9,6 +9,10 @@ const DEFAULT_WEBRTC_SERVER_IP = '192.168.61.142';
 const DEFAULT_H2_INIT_ARM_POSE_FILE = '';
 const DEFAULT_DATA_DIR = '~/data';
 const DEFAULT_IK_REPLAY_LIVE_URL = 'http://192.168.61.228:8000/api/live/state';
+const DEFAULT_OSS_PACKAGE_ROOT = '/data03/data/datasets/lerobot/packages';
+const DEFAULT_OSS_ROOT = 'oss://bwton-idc/openpi';
+const DEFAULT_MODEL_DOWNLOAD_ROOT = '/data03/data/models/openpi_downloads';
+const DEFAULT_OSS_TASK_NAME = 'h2_switch_close_to_remote_merged';
 const TASK_PAGE_SIZE = 10;
 let dataPreviewState = {preview:null,index:0,taskId:null,episode:null};
 let dataListState = {taskId:'',page:1,pageSize:50,total:0,episodes:[],tasks:[],loading:false};
@@ -20,7 +24,7 @@ let activeView = localStorage.getItem('teleop.activeView') || 'devices';
 let sidebarCollapsed = localStorage.getItem('teleop.sidebarCollapsed') === '1';
 let editingTrainingSetId = null;
 let expandedTrainingSetIds = new Set(JSON.parse(localStorage.getItem('teleop.expandedTrainingSets') || '[]'));
-let ossTransferState = {remoteUri:'',remoteEntries:[],loading:false,localDir:''};
+let ossTransferState = {remoteUri:'',remoteEntries:[],loading:false,localDir:'',taskName:''};
 
 function normalizeStaticLabels() {
   if (activeView === 'trainingDoc') {
@@ -528,7 +532,7 @@ function renderProcessingProfiles() {
         <span>${renderAssetsPackageStatus(task)}</span>
         <span title="${escapeHtml(`${controlText}；${cameraText}`)}">${escapeHtml(controlText)}<small>${escapeHtml(cameraText)}</small></span>
         <span title="${escapeHtml(instruction)}">${escapeHtml(instruction)}</span>
-        <span class="processing-row-actions"><button class="action" data-action="preview-data" data-id="${escapeHtml(profile.task_id)}">预览</button><button class="action blue" data-action="postprocess-data" data-id="${escapeHtml(profile.task_id)}">处理</button></span>
+        <span class="processing-row-actions"><button class="action" data-action="preview-data" data-id="${escapeHtml(profile.task_id)}">预览</button><button class="action blue" data-action="postprocess-data" data-id="${escapeHtml(profile.task_id)}">数据转换</button></span>
       </div>`;
     }).join('')}
   </div>`;
@@ -680,6 +684,53 @@ function packageTaskName(name) {
   const text = String(name || '').replace(/\.(tar\.gz|tgz)$/i, '');
   return text.split('_lerobot_')[0].split('_openpi_assets_')[0] || text;
 }
+function cleanTaskName(value) {
+  return String(value || '').trim().replace(/^\/+|\/+$/g, '');
+}
+function joinLocalPath(root, taskName = '') {
+  const base = String(root || '').replace(/\/+$/g, '');
+  const task = cleanTaskName(taskName);
+  return task ? `${base}/${task}` : base;
+}
+function joinOssPath(root, taskName = '') {
+  const base = String(root || DEFAULT_OSS_ROOT).replace(/\/+$/g, '');
+  const task = cleanTaskName(taskName);
+  return task ? `${base}/${task}` : base;
+}
+function ossTaskOptions(selectedTaskName = '') {
+  const names = new Set();
+  if (selectedTaskName) names.add(selectedTaskName);
+  (appState.tasks || []).forEach(task => {
+    if (task.name) names.add(task.name);
+  });
+  return [...names].filter(Boolean);
+}
+function taskByName(taskName) {
+  const name = cleanTaskName(taskName);
+  return (appState.tasks || []).find(task => task.name === name) || null;
+}
+function manualDerivedValues(taskName, values = {}) {
+  const task = taskName || 'h2_switch_close_to_remote';
+  const numTrainSteps = values.numTrainSteps || '50000';
+  const expName = `pi05_${task}_${numTrainSteps}`;
+  const packageTimestamp = values.packageTimestamp || currentTimestampText();
+  const dataPackageSuffix = String(values.dataPackage || '').match(/(_lerobot_.+\.(?:tar\.gz|tgz))$/i)?.[1] || '_lerobot_YYYYMMDD_HHMMSS.tar.gz';
+  return {
+    taskName: task,
+    dataPackage: `${task}${dataPackageSuffix}`,
+    repoId: `local/${task}`,
+    expName,
+    modelFile: `${expName}_${packageTimestamp}.tar.gz`,
+  };
+}
+function manualTaskOptions(selectedTaskName = '') {
+  const names = (appState.tasks || []).map(task => task.name).filter(Boolean);
+  const selected = cleanTaskName(selectedTaskName);
+  if (selected && !names.includes(selected)) names.unshift(selected);
+  return names.length
+    ? names.map(name => `<option value="${escapeHtml(name)}" ${name === selected ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')
+    : `<option value="${escapeHtml(selected || 'h2_switch_close_to_remote')}">${escapeHtml(selected || 'h2_switch_close_to_remote')}</option>`;
+}
 function shellQuote(value) {
   const text = String(value || '');
   return `'${text.replace(/'/g, `'\\''`)}'`;
@@ -702,9 +753,16 @@ function deliveryTemplates() {
 function deliveryTemplateSectionTitle(section) {
   return {
     data_upload: '一、数据上传',
-    training: '二、训练执行',
+    training: '二、模型训练',
     model_return: '三、模型回传',
+    model_deploy: '四、模型部署',
   }[section] || '其他命令';
+}
+function deliveryTemplateSection(item) {
+  const section = item?.section || 'training';
+  if (section === 'model_deploy') return section;
+  if (String(item?.title || '').includes('模型部署')) return 'model_deploy';
+  return section;
 }
 function renderTemplateBody(body, values) {
   return String(body || '').replace(/\{\{([A-Z0-9_]+)\}\}/g, (_, key) => {
@@ -713,15 +771,17 @@ function renderTemplateBody(body, values) {
 }
 function buildManualValues(input) {
   const task = input.taskName || 'h2_switch_close_to_remote';
-  const exp = input.expName || `pi05_${task}_50k`;
+  const derived = manualDerivedValues(task, input);
+  const exp = input.expName || derived.expName;
   const numTrainSteps = input.numTrainSteps || '50000';
   const modelTrainDir = input.modelTrainDir || String(Math.max(0, (Number(numTrainSteps) || 50000) - 1));
   const packageTimestamp = input.packageTimestamp || currentTimestampText();
-  const datasetFile = input.dataPackage || `${task}_lerobot_YYYYMMDD_HHMMSS.tar.gz`;
-  const modelName = input.modelFile || `${exp}_${modelTrainDir}_${packageTimestamp}.tar.gz`;
+  const datasetFile = input.dataPackage || derived.dataPackage;
+  const modelName = input.modelFile || `${exp}_${packageTimestamp}.tar.gz`;
   const root = (input.ossRoot || 'oss://bwton-idc/openpi').replace(/\/+$/, '');
   return {
     TASK_NAME: task,
+    INSTRUCTION: input.instruction || taskByName(task)?.instruction || '',
     DATA_PACKAGE: datasetFile,
     MODEL_FILE: modelName,
     OSS_ROOT: root,
@@ -737,7 +797,7 @@ function buildManualValues(input) {
     ASSETS_DIR: input.assetsDir || '/home/ubuntu/assets',
     CHECKPOINT_DIR: input.checkpointDir || '/home/ubuntu/models/openpi/checkpoints',
     LOG_DIR: input.logDir || '/home/ubuntu/models/openpi/logs',
-    REPO_ID: input.repoId || `local/${task}`,
+    REPO_ID: input.repoId || derived.repoId,
     CONFIG_NAME: input.configName || 'pi05_h2_lerobot',
     EXP_NAME: exp,
     ACTION_DIM: input.actionDim || '32',
@@ -755,13 +815,15 @@ function buildManualValues(input) {
   };
 }
 function deliveryTemplateRowHtml(item, index) {
+  const section = deliveryTemplateSection(item);
   return `<article class="template-editor-row" data-template-index="${index}" data-template-id="${escapeHtml(item.id || `template_${index + 1}`)}">
     <div class="template-editor-meta">
       <label><span>标题</span><input class="template-title" value="${escapeHtml(item.title || '')}"></label>
       <label><span>分组</span><select class="template-section">
-        <option value="data_upload" ${item.section === 'data_upload' ? 'selected' : ''}>数据上传</option>
-        <option value="training" ${item.section === 'training' ? 'selected' : ''}>训练执行</option>
-        <option value="model_return" ${item.section === 'model_return' ? 'selected' : ''}>模型回传</option>
+        <option value="data_upload" ${section === 'data_upload' ? 'selected' : ''}>数据上传</option>
+        <option value="training" ${section === 'training' ? 'selected' : ''}>模型训练</option>
+        <option value="model_return" ${section === 'model_return' ? 'selected' : ''}>模型回传</option>
+        <option value="model_deploy" ${section === 'model_deploy' ? 'selected' : ''}>模型部署</option>
       </select></label>
       <label><span>说明</span><input class="template-description" value="${escapeHtml(item.description || '')}"></label>
       <button class="icon-button danger template-delete" type="button" data-action="delivery-delete-template" title="删除标题">×</button>
@@ -777,7 +839,7 @@ function blankDeliveryTemplate() {
     description: '填写这段命令的用途',
     body: [
       '# 在这里编写命令模板',
-      '# 可使用 {{TASK_NAME}}、{{REPO_ID}}、{{DATA_PACKAGE}} 等变量',
+      '# 可使用 {{TASK_NAME}}、{{INSTRUCTION}}、{{REPO_ID}}、{{DATA_PACKAGE}} 等变量',
       '',
     ].join('\n'),
   };
@@ -787,11 +849,11 @@ function renderDeliveryTemplateEditors(templates) {
   return `<details class="manual-template-panel" open>
     <summary>命令模板</summary>
     <div class="template-toolbar">
-      <div class="template-help">模板保存在 ${escapeHtml(appState.delivery?.path || '数据目录/training/delivery_templates.json')}；可使用 {{TASK_NAME}}、{{DATA_PACKAGE}}、{{MODEL_FILE}}、{{REPO_ID}}、{{NUM_TRAIN_STEPS}}、{{MODEL_TRAIN_DIR}}、{{PACKAGE_TIMESTAMP}} 等变量。</div>
+      <div class="template-help">模板保存在 ${escapeHtml(appState.delivery?.path || 'config/delivery_templates.json')}；可使用 {{TASK_NAME}}、{{INSTRUCTION}}、{{DATA_PACKAGE}}、{{MODEL_FILE}}、{{REPO_ID}}、{{NUM_TRAIN_STEPS}}、{{MODEL_TRAIN_DIR}}、{{PACKAGE_TIMESTAMP}} 等变量。</div>
       <button class="action template-add" type="button" data-action="delivery-add-template">＋ 新增标题</button>
     </div>
     <div class="template-editor-list">${rows || '<div class="data-preview-empty compact">暂无模板</div>'}</div>
-    <div class="manual-doc-actions"><button class="action" data-action="delivery-reset-templates">恢复默认模板</button><button class="action blue" data-action="delivery-save-templates">保存模板</button></div>
+    <div class="manual-doc-actions"><button class="action" type="button" data-action="delivery-reset-templates">恢复默认模板</button><button class="action blue" type="button" data-action="delivery-save-templates">保存模板</button></div>
   </details>`;
 }
 function addDeliveryTemplateEditor() {
@@ -826,19 +888,24 @@ function currentManualValues() {
   const transfer = appState.oss_transfer || {};
   const packages = (transfer.local_entries || []).filter(item => item.is_package);
   const firstPackage = packages[0] || (transfer.packages || [])[0] || {};
-  const defaultTaskName = packageTaskName(firstPackage.name || '');
+  const defaultTaskName = (appState.tasks || [])[0]?.name || packageTaskName(firstPackage.name || '');
+  const taskName = $('#manualTaskName')?.value || defaultTaskName || 'h2_switch_close_to_remote';
+  const matchedPackage = packages.find(item => packageTaskName(item.name || '') === taskName)
+    || (transfer.packages || []).find(item => packageTaskName(item.name || '') === taskName);
+  const derived = manualDerivedValues(taskName, {dataPackage: matchedPackage?.name || firstPackage.name || '', numTrainSteps: $('#manualNumTrainSteps')?.value || '50000'});
   const ossRoot = transfer.oss_root || 'oss://bwton-idc/openpi';
   return {
-    taskName: $('#manualTaskName')?.value || defaultTaskName || 'h2_switch_close_to_remote',
-    dataPackage: $('#manualDataPackage')?.value || firstPackage.name || '',
+    taskName,
+    instruction: $('#manualInstruction')?.value || taskByName(taskName)?.instruction || '',
+    dataPackage: $('#manualDataPackage')?.value || matchedPackage?.name || derived.dataPackage,
     modelFile: $('#manualModelFile')?.value || '',
     ossRoot: $('#manualOssRoot')?.value || ossRoot,
-    repoId: $('#manualRepoId')?.value || (defaultTaskName ? `local/${defaultTaskName}` : ''),
+    repoId: $('#manualRepoId')?.value || derived.repoId,
     configName: $('#manualConfigName')?.value || 'pi05_h2_lerobot',
     actionDim: $('#manualActionDim')?.value || '32',
     realActionDim: $('#manualRealActionDim')?.value || '16',
     actionHorizon: $('#manualActionHorizon')?.value || '16',
-    expName: $('#manualExpName')?.value || (defaultTaskName ? `pi05_${defaultTaskName}_50k` : ''),
+    expName: $('#manualExpName')?.value || derived.expName,
     numTrainSteps: $('#manualNumTrainSteps')?.value || '50000',
     modelTrainDir: $('#manualModelTrainDir')?.value || '',
     packageTimestamp: $('#manualPackageTimestamp')?.value || currentTimestampText(),
@@ -849,6 +916,30 @@ function updateManualModelFileName() {
   if (!modelInput) return;
   const values = buildManualValues({...currentManualValues(), modelFile: ''});
   modelInput.value = values.MODEL_FILE;
+}
+function syncManualDerivedFieldsFromTask() {
+  const taskInput = $('#manualTaskName');
+  if (!taskInput) return;
+  const current = currentManualValues();
+  const derived = manualDerivedValues(taskInput.value, current);
+  const dataInput = $('#manualDataPackage');
+  const repoInput = $('#manualRepoId');
+  const expInput = $('#manualExpName');
+  const modelInput = $('#manualModelFile');
+  const instructionInput = $('#manualInstruction');
+  if (dataInput) dataInput.value = derived.dataPackage;
+  if (repoInput) repoInput.value = derived.repoId;
+  if (expInput) expInput.value = derived.expName;
+  if (modelInput) modelInput.value = derived.modelFile;
+  if (instructionInput) instructionInput.value = taskByName(taskInput.value)?.instruction || '';
+}
+function syncManualExpNameFromSteps() {
+  const taskInput = $('#manualTaskName');
+  const expInput = $('#manualExpName');
+  if (!taskInput || !expInput) return;
+  const current = currentManualValues();
+  expInput.value = manualDerivedValues(taskInput.value, {...current, expName: ''}).expName;
+  updateManualModelFileName();
 }
 function syncManualModelTrainDir() {
   const stepsInput = $('#manualNumTrainSteps');
@@ -862,8 +953,8 @@ function syncManualModelTrainDir() {
 function renderManualCommands(input) {
   const values = buildManualValues(input);
   const templates = deliveryTemplates();
-  const grouped = ['data_upload', 'training', 'model_return'].map(section => {
-    const sectionTemplates = templates.filter(item => (item.section || 'training') === section);
+  const grouped = ['data_upload', 'training', 'model_return', 'model_deploy'].map(section => {
+    const sectionTemplates = templates.filter(item => deliveryTemplateSection(item) === section);
     if (!sectionTemplates.length) return '';
     return `<div class="manual-command-section"><h3>${deliveryTemplateSectionTitle(section)}</h3>${sectionTemplates.map(item => renderManualCommandBlock(
       item.title || '未命名命令',
@@ -873,11 +964,13 @@ function renderManualCommands(input) {
   }).join('');
   const modelName = values.MODEL_FILE;
   const datasetFile = values.DATA_PACKAGE;
+  const taskOptions = manualTaskOptions(values.TASK_NAME);
   return `<section class="manual-doc-card training-command-card">
     <details class="manual-param-panel" open>
       <summary>交付参数</summary>
     <div class="manual-doc-form">
-      <label><span>任务名</span><input id="manualTaskName" value="${escapeHtml(values.TASK_NAME)}"></label>
+      <label><span>任务名</span><select id="manualTaskName">${taskOptions}</select></label>
+      <label><span>instruction</span><input id="manualInstruction" value="${escapeHtml(values.INSTRUCTION)}"></label>
       <label><span>数据压缩包文件名</span><input id="manualDataPackage" value="${escapeHtml(datasetFile)}"></label>
       <label><span>模型文件名</span><input id="manualModelFile" value="${escapeHtml(modelName)}"></label>
       <label><span>OSS 根目录</span><input id="manualOssRoot" value="${escapeHtml(values.OSS_ROOT)}"></label>
@@ -913,13 +1006,23 @@ function renderOssTransfer() {
   const box = $('#ossTransferPanel');
   if (!box) return;
   const transfer = appState.oss_transfer || {};
-  const localDir = ossTransferState.localDir || transfer.local_dir || `${appState.data_dir || ''}/datasets/lerobot`;
-  const localParent = transfer.local_parent || localDir;
+  const taskCandidates = ossTaskOptions(ossTransferState.taskName);
+  const inferredTaskName = ossTransferState.taskName || taskCandidates[0] || packageTaskName((transfer.packages || [])[0]?.name || (transfer.local_entries || []).find(item => item.is_package)?.name || '');
+  const taskName = cleanTaskName(inferredTaskName);
+  if (taskName && !ossTransferState.taskName) ossTransferState.taskName = taskName;
+  const localBaseDir = DEFAULT_OSS_PACKAGE_ROOT;
+  const localDir = ossTransferState.localDir || joinLocalPath(localBaseDir, taskName);
+  const localParent = transfer.local_parent || localBaseDir;
   const entries = transfer.local_entries || [];
   const directories = entries.filter(item => item.is_dir);
   const packages = entries.filter(item => item.is_package);
-  const ossRoot = transfer.oss_root || 'oss://bwton-idc/openpi';
-  const remoteUri = ossTransferState.remoteUri || ossRoot;
+  const ossRoot = transfer.oss_root || DEFAULT_OSS_ROOT;
+  const taskOssUri = joinOssPath(ossRoot, taskName);
+  const remoteUri = ossTransferState.remoteUri || taskOssUri;
+  const downloadDir = joinLocalPath(DEFAULT_MODEL_DOWNLOAD_ROOT, taskName);
+  const taskOptions = taskCandidates.length
+    ? taskCandidates.map(name => `<option value="${escapeHtml(name)}" ${name === taskName ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')
+    : `<option value="${escapeHtml(taskName || DEFAULT_OSS_TASK_NAME)}">${escapeHtml(taskName || DEFAULT_OSS_TASK_NAME)}</option>`;
   const remoteFiles = (ossTransferState.remoteEntries || []).filter(item => !item.is_dir);
   const remoteOptions = remoteFiles.length
     ? remoteFiles.map(item => `<option value="${escapeHtml(item.uri)}">${escapeHtml(item.uri)}</option>`).join('')
@@ -930,7 +1033,6 @@ function renderOssTransfer() {
   const packageRows = packages.length
     ? packages.map(item => `<div class="oss-package-row">
         <span class="oss-package-name"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.path)} · ${escapeHtml(formatBytes(item.size_bytes))}</small></span>
-        <label class="oss-task-name-field"><span>上传任务目录</span><input class="oss-task-name" value="${escapeHtml(packageTaskName(item.name))}" aria-label="上传任务目录"></label>
         <button class="action blue" data-action="oss-upload" data-local-path="${escapeHtml(item.path)}" data-package-name="${escapeHtml(item.name)}">上传</button>
       </div>`).join('')
     : '<div class="data-preview-empty compact">当前目录没有 .tar.gz/.tgz 压缩包</div>';
@@ -957,25 +1059,34 @@ function renderOssTransfer() {
     }).join('')
     : '<div class="data-preview-empty compact">暂无 OSS 上传或下载任务</div>';
   box.innerHTML = `<div class="oss-workbench">
+    <section class="oss-card wide">
+      <div class="oss-card-head"><div><h3>任务目录</h3><p>选择任务名后，本地包目录、OSS 目录、模型下载目录会自动追加同名子目录</p></div></div>
+      <div class="oss-transfer-grid oss-task-dir-grid">
+        <label><span>任务名</span><select id="ossTaskNameInput">${taskOptions}</select></label>
+        <label><span>本地包根目录</span><input id="ossLocalBaseInput" value="${escapeHtml(localBaseDir)}" title="${escapeHtml(localBaseDir)}" readonly></label>
+        <label><span>OSS 根目录</span><input id="ossRootInput" value="${escapeHtml(ossRoot)}" title="${escapeHtml(ossRoot)}" placeholder="${escapeHtml(DEFAULT_OSS_ROOT)}"></label>
+        <label><span>模型下载根目录</span><input id="ossDownloadBaseInput" value="${escapeHtml(DEFAULT_MODEL_DOWNLOAD_ROOT)}" title="${escapeHtml(DEFAULT_MODEL_DOWNLOAD_ROOT)}" readonly></label>
+      </div>
+    </section>
     <section class="oss-card">
       <div class="oss-card-head"><div><h3>数据上传</h3><p>选择本地压缩包，上传到 OSS 任务目录</p></div></div>
       <div class="oss-local-toolbar">
-        <label><span>本地目录</span><input id="ossLocalDirInput" value="${escapeHtml(localDir)}" placeholder="${escapeHtml(`${appState.data_dir || ''}/datasets/lerobot`)}"></label>
+        <label><span>本地目录</span><input id="ossLocalDirInput" value="${escapeHtml(localDir)}" placeholder="${escapeHtml(joinLocalPath(DEFAULT_OSS_PACKAGE_ROOT, taskName))}"></label>
         <button class="action" data-action="oss-local-list">打开/刷新</button>
         <button class="action" data-action="oss-open-local-dir" data-path="${escapeHtml(localParent)}">上一级</button>
       </div>
       <div class="oss-dir-hint">点击下方子目录可进入；修改本地目录后点“打开/刷新”重新读取。</div>
       <div class="oss-dir-list">${dirRows}</div>
-      <label class="oss-root-line"><span>OSS 根目录</span><input id="ossRootInput" value="${escapeHtml(ossRoot)}" placeholder="oss://bwton-idc/openpi"><small>上传目标：OSS根目录/上传任务目录/</small></label>
+      <label class="oss-root-line"><span>OSS 上传目录</span><input id="ossUploadUriInput" value="${escapeHtml(taskOssUri)}" readonly><small>上传目标：OSS 根目录/任务名/</small></label>
       <div class="oss-package-list">${packageRows}</div>
     </section>
     <section class="oss-card">
       <div class="oss-card-head"><div><h3>模型回拉</h3><p>查看 OSS 目录，选择训练后的模型文件下载到本地</p></div></div>
       <div class="oss-transfer-grid model-download-grid">
-        <label class="oss-list-uri"><span>OSS 查看目录</span><input id="ossListUriInput" value="${escapeHtml(remoteUri)}" placeholder="oss://bwton-idc/openpi"></label>
+        <label class="oss-list-uri"><span>OSS 查看目录</span><input id="ossListUriInput" value="${escapeHtml(remoteUri)}" placeholder="${escapeHtml(taskOssUri)}"></label>
         <div class="oss-actions"><button class="action" data-action="oss-list" ${ossTransferState.loading ? 'disabled' : ''}>${ossTransferState.loading ? '刷新中...' : '刷新 OSS 列表'}</button></div>
         <label><span>远端模型文件</span><select id="ossRemoteObject" ${remoteFiles.length ? '' : 'disabled'}>${remoteOptions}</select><small>${remoteFiles.length ? `共 ${remoteFiles.length} 个文件` : '使用 ossutil ls 查看目录后选择文件下载'}</small></label>
-        <label><span>模型下载目录</span><input id="ossDownloadDir" value="${escapeHtml(transfer.model_download_dir || '')}" placeholder="/data03/data/models/openpi_downloads"><small>模型文件会下载到该目录</small></label>
+        <label><span>模型下载目录</span><input id="ossDownloadDir" value="${escapeHtml(downloadDir)}" placeholder="${escapeHtml(joinLocalPath(DEFAULT_MODEL_DOWNLOAD_ROOT, taskName))}"><small>模型文件会下载到该任务目录</small></label>
         <div class="oss-actions"><button class="action blue" data-action="oss-download" ${remoteFiles.length ? '' : 'disabled'}>下载模型</button></div>
       </div>
     </section>
@@ -1226,10 +1337,12 @@ function renderPostprocessJobs() {
   const list = $('#postprocessJobList');
   const hint = $('#postprocessJobHint');
   if (!list || !hint) return;
+  const datasetJobKinds = new Set(['convert', 'normalize', 'package', 'package_assets']);
   const activeTask = activePostprocessTaskId ? appState.tasks.find(t => t.id === activePostprocessTaskId) : null;
   const activeRepoId = activeTask?.postprocess_status?.repo_id || (activeTask ? `local/${activeTask.name}` : '');
   const activeRobotDir = activeTask ? `${appState.dataset_root}/${activeTask.name}` : '';
   let jobs = (appState.postprocess_jobs || []).filter(job => {
+    if (!datasetJobKinds.has(job.kind)) return false;
     if (!activeTask) return true;
     return job.task_id === activeTask.id
       || job.task_name === activeTask.name
@@ -1275,7 +1388,7 @@ function renderPostprocessJobs() {
       ? 'LeRobot 转换'
       : (job.kind === 'package' || job.kind === 'package_assets'
         ? (job.kind === 'package_assets' ? '归一化压缩' : '数据压缩')
-        : (job.kind === 'oss_upload' ? 'OSS 上传' : (job.kind === 'oss_download' ? '模型下载' : '归一化统计')));
+        : '归一化统计');
     return `<article class="postprocess-job">
       <div class="episode-preview-head">
         <div><h3>${jobTitle} · ${escapeHtml(job.task_name)}</h3><p>PID ${escapeHtml(job.pid || '—')} · ${escapeHtml(formatTime(job.started_at))}</p></div>
@@ -1627,11 +1740,13 @@ function updateImageEncodingHint() {
   const hint = $('#imageEncodingHint');
   if (!form?.elements.image_encoding || !form?.elements.jpeg_quality) return;
   const encoding = form.elements.image_encoding.value || 'auto';
-  form.elements.jpeg_quality.disabled = encoding === 'png';
+  form.elements.jpeg_quality.disabled = encoding === 'png' || encoding === 'video';
   if (hint) {
     hint.textContent = encoding === 'auto'
       ? '自动：原始 JPG 保存 JPG，原始 PNG 保存 PNG'
-      : (encoding === 'jpg' ? '强制保存为 JPG/JPEG，使用 JPEG 质量参数' : '强制保存为 PNG，JPEG 质量不生效');
+      : (encoding === 'jpg'
+        ? '强制保存为 JPG/JPEG，使用 JPEG 质量参数'
+        : (encoding === 'video' ? '保存为 LeRobot Video MP4，适合大数据集和远端训练' : '强制保存为 PNG，JPEG 质量不生效'));
   }
 }
 function showPostprocess(task) {
@@ -1805,6 +1920,27 @@ $('#nextDataListPage')?.addEventListener('click', () => {
   dataListState.page = Math.min(totalPages, (dataListState.page || 1) + 1);
   loadDataList({silent:false});
 });
+document.addEventListener('change', event => {
+  if (event.target?.id === 'ossTaskNameInput') {
+    const taskName = cleanTaskName(event.target.value);
+    ossTransferState.taskName = taskName;
+    ossTransferState.localDir = joinLocalPath(DEFAULT_OSS_PACKAGE_ROOT, taskName);
+    ossTransferState.remoteUri = joinOssPath($('#ossRootInput')?.value || DEFAULT_OSS_ROOT, taskName);
+    ossTransferState.remoteEntries = [];
+    renderOssTransfer();
+  }
+  if (event.target?.id === 'ossRootInput') {
+    const taskName = cleanTaskName($('#ossTaskNameInput')?.value || ossTransferState.taskName);
+    ossTransferState.remoteUri = joinOssPath(event.target.value || DEFAULT_OSS_ROOT, taskName);
+    ossTransferState.remoteEntries = [];
+    renderOssTransfer();
+  }
+});
+document.addEventListener('input', event => {
+  if (event.target?.id === 'ossTaskNameInput') {
+    ossTransferState.taskName = cleanTaskName(event.target.value);
+  }
+});
 ['statusFilter','taskSearch'].forEach(id => $(`#${id}`).addEventListener(id==='taskSearch'?'input':'change', () => { taskPage = 1; renderTasks(); }));
 $('#prevTaskPage')?.addEventListener('click', () => { taskPage = Math.max(1, taskPage - 1); renderTasks(); });
 $('#nextTaskPage')?.addEventListener('click', () => { taskPage += 1; renderTasks(); });
@@ -1925,11 +2061,19 @@ document.addEventListener('change', event => {
     const input = $('#ossTaskNameInput');
     if (input && option) input.value = packageTaskName(option.textContent || '');
   }
+  if (event.target?.id === 'manualTaskName') {
+    syncManualDerivedFieldsFromTask();
+  }
 });
 document.addEventListener('input', event => {
   const id = event.target?.id;
+  if (id === 'manualTaskName') {
+    syncManualDerivedFieldsFromTask();
+    return;
+  }
   if (id === 'manualNumTrainSteps') {
     syncManualModelTrainDir();
+    syncManualExpNameFromSteps();
     return;
   }
   if (id === 'manualModelTrainDir' || id === 'manualPackageTimestamp' || id === 'manualExpName') {
@@ -2046,6 +2190,7 @@ document.addEventListener('click', async event => {
     return;
   }
   const button=event.target.closest('[data-action]'); if(!button)return;
+  event.preventDefault();
   holdAutoRefresh(1600);
   const id=button.dataset.id, action=button.dataset.action;
   const task=appState.tasks.find(t=>t.id===Number(id));
@@ -2234,7 +2379,8 @@ document.addEventListener('click', async event => {
     return;
   }
   if(action==='oss-list'){
-    const uri = $('#ossListUriInput')?.value || $('#ossRootInput')?.value || appState.oss_transfer?.oss_root;
+    const taskName = cleanTaskName($('#ossTaskNameInput')?.value || ossTransferState.taskName);
+    const uri = $('#ossListUriInput')?.value || joinOssPath($('#ossRootInput')?.value || appState.oss_transfer?.oss_root || DEFAULT_OSS_ROOT, taskName);
     const originalText = button.textContent;
     button.disabled = true;
     button.textContent = '刷新中...';
@@ -2256,7 +2402,8 @@ document.addEventListener('click', async event => {
     return;
   }
   if(action==='oss-local-list' || action==='oss-open-local-dir'){
-    const directory = action === 'oss-open-local-dir' ? button.dataset.path : $('#ossLocalDirInput')?.value;
+    const taskName = cleanTaskName($('#ossTaskNameInput')?.value || ossTransferState.taskName);
+    const directory = action === 'oss-open-local-dir' ? button.dataset.path : ($('#ossLocalDirInput')?.value || joinLocalPath(DEFAULT_OSS_PACKAGE_ROOT, taskName));
     const originalText = button.textContent;
     button.disabled = true;
     button.textContent = '打开中...';
@@ -2276,9 +2423,8 @@ document.addEventListener('click', async event => {
   }
   if(action==='oss-upload'){
     const localPath = button.dataset.localPath || $('#ossLocalPackage')?.value || '';
-    const ossRoot = $('#ossRootInput')?.value || appState.oss_transfer?.oss_root;
-    const row = button.closest('.oss-package-row');
-    const taskName = row?.querySelector('.oss-task-name')?.value || packageTaskName(button.dataset.packageName || '');
+    const ossRoot = $('#ossRootInput')?.value || appState.oss_transfer?.oss_root || DEFAULT_OSS_ROOT;
+    const taskName = cleanTaskName($('#ossTaskNameInput')?.value || ossTransferState.taskName || packageTaskName(button.dataset.packageName || ''));
     if (!localPath) return showNotice('请先选择本地压缩包');
     const originalText = button.textContent;
     button.disabled = true;
@@ -2295,7 +2441,8 @@ document.addEventListener('click', async event => {
   }
   if(action==='oss-download'){
     const ossUri = $('#ossRemoteObject')?.value || '';
-    const targetDir = $('#ossDownloadDir')?.value || '';
+    const taskName = cleanTaskName($('#ossTaskNameInput')?.value || ossTransferState.taskName);
+    const targetDir = $('#ossDownloadDir')?.value || joinLocalPath(DEFAULT_MODEL_DOWNLOAD_ROOT, taskName);
     if (!ossUri) return showNotice('请先选择远端模型文件');
     const originalText = button.textContent;
     button.disabled = true;
@@ -2329,14 +2476,16 @@ document.addEventListener('click', async event => {
     button.disabled = true;
     button.textContent = '保存中...';
     try {
-      const result = await api('/api/delivery/templates/save', {templates: collectDeliveryTemplates()});
+      const templates = collectDeliveryTemplates();
+      if (!templates.length) throw new Error('没有可保存的模板');
+      const result = await api('/api/delivery/templates/save', {templates});
       if (result.state) applyState(result.state);
       else if (result.delivery) appState.delivery = result.delivery;
       if (activeView === 'trainingTemplate') renderTrainingTemplateView();
       else renderActiveView();
       showNotice('命令模板已保存', 'success');
     } catch(e) {
-      showNotice(e.message);
+      showNotice(e.message === 'Failed to fetch' ? '保存请求没有到达服务端，请刷新页面后重试' : e.message);
     } finally {
       button.disabled = false;
       button.textContent = originalText;
