@@ -13,7 +13,13 @@ import json
 import numpy as np
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
-sys.path.append(parent_dir)
+for import_dir in (
+    parent_dir,
+    os.path.join(current_dir, "teleimager", "src"),
+    os.path.join(current_dir, "robot_control", "dex-retargeting", "src"),
+):
+    if import_dir not in sys.path:
+        sys.path.insert(0, import_dir)
 
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize # dds 
 from televuer import TeleVuerWrapper

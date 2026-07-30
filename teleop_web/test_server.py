@@ -252,6 +252,9 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual([camera["record_colors"] for camera in preview["cameras"]], [
             ["color_0"], ["color_1"], ["color_2"], ["color_3"],
         ])
+        self.assertEqual(preview["cameras"][0]["serial_number"], "CP0BB53000FS")
+        self.assertEqual(preview["cameras"][0]["usb_interface"], "1.4")
+        self.assertEqual(preview["cameras"][0]["video_index"], 0)
 
     def test_device_and_task_registry_is_persistent(self):
         with tempfile.TemporaryDirectory() as directory:

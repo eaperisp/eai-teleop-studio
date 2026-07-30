@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 from collections import deque
 from datetime import datetime
@@ -47,6 +48,11 @@ except Exception:  # pragma: no cover - Pillow is expected in runtime envs.
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_NAME = PROJECT_ROOT.name
+TELEOP_ROOT = PROJECT_ROOT / "teleop"
+TELEIMAGER_SRC_ROOT = TELEOP_ROOT / "teleimager" / "src"
+for import_root in (TELEOP_ROOT, TELEIMAGER_SRC_ROOT):
+    if import_root.exists() and str(import_root) not in sys.path:
+        sys.path.insert(0, str(import_root))
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
 ENTRYPOINT = PROJECT_ROOT / "teleop" / "teleop_hand_and_arm.py"
 CONVERT_ENTRYPOINT = PROJECT_ROOT / "tools" / "convert_h2_to_lerobot.py"
@@ -1676,9 +1682,9 @@ class TeleopManager:
     def _validate_local_package_path(self, raw_path: Any) -> Path:
         path = Path(str(raw_path or "")).expanduser().resolve()
         if not path.is_file():
-            raise ValidationError(f"?????????{path}")
+            raise ValidationError(f"本地文件不存在：{path}")
         if path.suffixes[-2:] != [".tar", ".gz"] and path.suffix != ".tgz":
-            raise ValidationError("????? .tar.gz ? .tgz ???")
+            raise ValidationError("请选择 .tar.gz 或 .tgz 文件")
         try:
             path.relative_to(self.data_dir.resolve())
             return path
@@ -1692,18 +1698,18 @@ class TeleopManager:
                 continue
         if path.parent == self.lerobot_home.resolve():
             return path
-        raise ValidationError("?????????????????")
+        raise ValidationError("只能选择数据目录下的本地包文件")
 
     def _validate_local_browser_dir(self, raw_dir: Any = None) -> Path:
         directory = Path(str(raw_dir or self.lerobot_home)).expanduser().resolve()
-        if not directory.exists():
-            raise ValidationError(f"????????{directory}")
-        if not directory.is_dir():
-            raise ValidationError(f"???????{directory}")
         try:
             directory.relative_to(self.data_dir.resolve())
         except ValueError as exc:
-            raise ValidationError("?????????????????") from exc
+            raise ValidationError("只能浏览数据目录下的本地目录") from exc
+        if not directory.exists():
+            directory.mkdir(parents=True, exist_ok=True)
+        if not directory.is_dir():
+            raise ValidationError(f"本地路径不是目录：{directory}")
         return directory
 
     def oss_local_packages(self, raw: Any = None) -> dict[str, Any]:
@@ -4855,59 +4861,94 @@ class AppHandler(BaseHTTPRequestHandler):
     manager: TeleopManager
 
     def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        path = parsed.path
-        if path == "/api/state":
-            self._json(self.manager.state())
-            return
-        if path == "/api/tasks/file":
-            query = parse_qs(parsed.query)
-            try:
-                file_path = self.manager.dataset_file(
-                    query.get("task_id", [""])[0],
-                    query.get("episode", [""])[0],
-                    query.get("path", [""])[0],
-                )
-            except ValidationError as exc:
-                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        started = time.perf_counter()
+        self._last_status = HTTPStatus.OK
+        path = urlparse(self.path).path
+        error: str | None = None
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            if path == "/api/state":
+                self._json(self.manager.state())
                 return
+            if path == "/api/tasks/file":
+                query = parse_qs(parsed.query)
+                try:
+                    file_path = self.manager.dataset_file(
+                        query.get("task_id", [""])[0],
+                        query.get("episode", [""])[0],
+                        query.get("path", [""])[0],
+                    )
+                except ValidationError as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    body = file_path.read_bytes()
+                except OSError:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path == "/":
+                path = "/index.html"
+            filename = path.removeprefix("/")
+            if filename not in {"index.html", "app.js", "styles.css", "device.css"}:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            file_path = STATIC_ROOT / filename
+            content_types = {".html": "text/html", ".js": "text/javascript", ".css": "text/css"}
             try:
                 body = file_path.read_bytes()
             except OSError:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
             self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Type", f"{content_types[file_path.suffix]}; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
-            return
-        if path == "/":
-            path = "/index.html"
-        filename = path.removeprefix("/")
-        if filename not in {"index.html", "app.js", "styles.css", "device.css"}:
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        file_path = STATIC_ROOT / filename
-        content_types = {".html": "text/html", ".js": "text/javascript", ".css": "text/css"}
-        try:
-            body = file_path.read_bytes()
-        except OSError:
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", f"{content_types[file_path.suffix]}; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        except ValidationError as exc:
+            error = str(exc)
+            self.manager.logger.write(
+                "warning",
+                "http get validation failed",
+                path=path,
+                client=self.client_address[0],
+                error=error,
+            )
+            self._json({"error": error}, HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            error = str(exc)
+            self.manager.logger.write(
+                "error",
+                "http get failed",
+                path=path,
+                client=self.client_address[0],
+                error=error,
+                error_type=type(exc).__name__,
+                traceback=traceback.format_exc(),
+            )
+            if path.startswith("/api/"):
+                self._json({"error": error or "internal server error"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            else:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
+        finally:
+            self._log_access("GET", path, started, error=error)
 
     def do_POST(self) -> None:
+        started = time.perf_counter()
+        self._last_status = HTTPStatus.OK
+        path = urlparse(self.path).path
+        error: str | None = None
         try:
             payload = self._read_json()
-            path = urlparse(self.path).path
             self.manager.logger.write(
                 "info",
                 "http post received",
@@ -4967,7 +5008,16 @@ class AppHandler(BaseHTTPRequestHandler):
             elif path == "/api/start":
                 result = self.manager.start_task(payload.get("task_id"))
             elif path == "/api/control":
-                result = self.manager.control(payload.get("action", ""))
+                action = payload.get("action", "")
+                self.manager.logger.write(
+                    "info",
+                    "teleop control request received",
+                    action=action,
+                    client=self.client_address[0],
+                    referer=self.headers.get("Referer", ""),
+                    user_agent=self.headers.get("User-Agent", ""),
+                )
+                result = self.manager.control(action)
             elif path == "/api/ik-replay/target":
                 result = self.manager.ik_replay_target(payload)
             else:
@@ -4975,23 +5025,29 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             self._json(result)
         except (ValidationError, TrainingPrepError) as exc:
+            error = str(exc)
             self.manager.logger.write(
                 "warning",
                 "http post validation failed",
                 path=urlparse(self.path).path,
                 client=self.client_address[0],
-                error=str(exc),
+                error=error,
             )
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
+            error = str(exc)
             self.manager.logger.write(
                 "error",
                 "http post failed",
                 path=urlparse(self.path).path,
                 client=self.client_address[0],
-                error=str(exc),
+                error=error,
+                error_type=type(exc).__name__,
+                traceback=traceback.format_exc(),
             )
             self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        finally:
+            self._log_access("POST", path, started, error=error)
 
     def _read_json(self) -> dict[str, Any]:
         try:
@@ -5010,12 +5066,32 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def _json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._last_status = status
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+        self._last_status = HTTPStatus(code)
+        super().send_error(code, message, explain)
+
+    def _log_access(self, method: str, path: str, started: float, *, error: str | None = None) -> None:
+        status = int(getattr(self, "_last_status", HTTPStatus.OK))
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+        level = "error" if status >= 500 else "warning" if status >= 400 else "access"
+        fields: dict[str, Any] = {
+            "method": method,
+            "path": path,
+            "status": status,
+            "duration_ms": duration_ms,
+            "client": self.client_address[0],
+        }
+        if error:
+            fields["error"] = error
+        self.manager.logger.write(level, "http request", **fields)
 
     def log_message(self, fmt: str, *args: Any) -> None:
         # Suppress BaseHTTPRequestHandler access logs such as the frequent

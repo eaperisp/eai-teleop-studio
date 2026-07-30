@@ -1,0 +1,17 @@
+[Unit]
+Description=Robot dataset sync tool
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@PROJECT_ROOT@
+EnvironmentFile=-@PROJECT_ROOT@/config/robot_sync.env
+ExecStart=/usr/bin/env bash -lc 'exec "${ROBOT_SYNC_PYTHON:-/home/robot/miniconda3/envs/teleop/bin/python}" -m robot_sync_tool.main'
+StandardOutput=append:@PROJECT_ROOT@/logs/robot-sync-tool.service.log
+StandardError=append:@PROJECT_ROOT@/logs/robot-sync-tool.service.log
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

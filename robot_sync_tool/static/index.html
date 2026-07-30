@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Robot 数据同步控制台</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260723-page-jump-input" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">RS</div>
+        <div>
+          <h1>Robot Sync</h1>
+          <p>采集数据同步控制台</p>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="主导航">
+        <button class="active" data-tab="control">同步控制</button>
+        <button data-tab="records">同步记录</button>
+      </nav>
+
+      <div class="connection">
+        <div class="label">远端连接</div>
+        <div class="host" id="remoteHost">robot@192.168.61.228</div>
+        <div class="label gap">跳板机</div>
+        <div class="host" id="jumpHost">robot-server-4090</div>
+      </div>
+    </aside>
+
+    <main>
+      <section class="topbar">
+        <div class="title">
+          <h2 id="pageTitle">数据同步任务</h2>
+          <p id="pageDesc">同步 ~/data/datasets/robot，跳过压缩文件和 bak 备份数据。</p>
+        </div>
+        <div class="status-pill" id="statusPill">
+          <span class="dot"></span>
+          <span id="statusText">停止中</span>
+        </div>
+      </section>
+      <div class="notice" id="notice" role="status"></div>
+
+      <div class="tab-page active" data-page="control">
+        <section class="grid">
+          <div class="panel" id="controlPanel">
+            <div class="panel-header">
+              <h3>控制与配置</h3>
+            </div>
+            <div class="panel-body">
+              <div class="controls">
+                <button class="btn primary" id="startBtn">开始同步</button>
+                <button class="btn danger" id="stopBtn">停止同步</button>
+                <button class="btn secondary" id="testConnectionBtn">测试连接</button>
+                <button class="btn secondary" id="scanBtn">立即扫描一次</button>
+                <button class="btn secondary" id="saveConfigBtn">保存配置</button>
+              </div>
+
+              <div class="form">
+                <label class="field">
+                  <span>远端主机</span>
+                  <input id="remoteHostInput" />
+                </label>
+                <label class="field">
+                  <span>跳板机</span>
+                  <input id="jumpHostInput" placeholder="部署在 robot-server-4090 时留空" />
+                </label>
+                <label class="field">
+                  <span>SSH 密码</span>
+                  <div class="password-wrap">
+                    <input id="sshPasswordInput" type="password" placeholder="留空表示不修改；优先建议配置免密 SSH" autocomplete="new-password" />
+                    <button class="icon-btn" id="togglePasswordBtn" type="button" title="显示密码" aria-label="显示密码">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path class="eye" d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
+                        <circle class="pupil" cx="12" cy="12" r="3"></circle>
+                        <path class="slash" d="M4 4l16 16"></path>
+                      </svg>
+                    </button>
+                  </div>
+                </label>
+                <label class="field">
+                  <span>远端目录</span>
+                  <input id="remoteDir" />
+                </label>
+                <label class="field">
+                  <span>本地目录</span>
+                  <input id="localDir" />
+                </label>
+                <div class="split">
+                  <label class="field">
+                    <span>扫描间隔</span>
+                    <input id="intervalSeconds" type="number" min="1" />
+                  </label>
+                  <label class="field">
+                    <span>稳定等待</span>
+                    <input id="settleSeconds" type="number" min="1" />
+                  </label>
+                </div>
+                <div class="split">
+                  <label class="field">
+                    <span>记录识别层级</span>
+                    <input id="recordDepth" type="number" min="1" />
+                  </label>
+                  <label class="field">
+                    <span>并发同步数</span>
+                    <input id="concurrentSyncs" type="number" min="1" max="8" />
+                  </label>
+                </div>
+                <div class="split">
+                  <label class="field">
+                    <span>停止方式</span>
+                    <select id="stopMode">
+                      <option value="graceful">当前记录同步完成后停止</option>
+                      <option value="immediate">立即停止当前 rsync</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="field">
+                  <span>排除规则</span>
+                  <textarea id="excludeListInput" rows="4"></textarea>
+                  <small>每行一条，例如 *.zip 或 *bak*</small>
+                </div>
+                <div class="connection-status" id="connectionStatus">连接状态：未测试</div>
+              </div>
+            </div>
+          </div>
+
+          <div id="queueColumn">
+            <div class="stats">
+              <div class="stat">
+                <div class="value" id="syncedCount">0</div>
+                <div class="name">已同步</div>
+              </div>
+              <div class="stat">
+                <div class="value" id="newCount">0</div>
+                <div class="name">本轮新增</div>
+              </div>
+              <div class="stat">
+                <div class="value" id="waitingCount">0</div>
+                <div class="name">等待稳定</div>
+              </div>
+              <div class="stat">
+                <div class="value" id="failedCount">0</div>
+                <div class="name">失败重试</div>
+              </div>
+            </div>
+
+            <div class="panel" id="queuePanel">
+              <div class="panel-header">
+                <h3>同步队列</h3>
+                <span class="tag" id="lastScan">上次扫描 -</span>
+              </div>
+              <div class="panel-body">
+                <div class="queue" id="queue"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel log-panel">
+          <div class="panel-header">
+            <h3>运行日志</h3>
+            <span class="tag">最近 200 条</span>
+          </div>
+          <div class="panel-body">
+            <div class="log" id="log"></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="tab-page" data-page="records">
+        <section class="panel">
+          <div class="panel-header">
+            <h3>同步记录</h3>
+            <div class="records-tools">
+              <label>
+                <span>状态</span>
+                <select id="recordStatusFilter">
+                  <option value="">全部</option>
+                  <option value="waiting">等待同步/稳定</option>
+                  <option value="syncing">同步中</option>
+                  <option value="done">已同步</option>
+                  <option value="failed">失败</option>
+                </select>
+              </label>
+              <button class="btn secondary small" id="refreshRecordsBtn">刷新</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>记录路径</th>
+                    <th>状态</th>
+                    <th>大小</th>
+                    <th>文件数</th>
+                    <th>上次同步</th>
+                  </tr>
+                </thead>
+                <tbody id="recordsTable">
+                  <tr>
+                    <td>h2_switch_close_to_remote/episode_000319</td>
+                    <td><span class="badge syncing">同步中</span></td>
+                    <td>12.8 GB</td>
+                    <td>3142</td>
+                    <td>14:32:12</td>
+                  </tr>
+                  <tr>
+                    <td>walk_pick_place/episode_000084</td>
+                    <td><span class="badge done">已同步</span></td>
+                    <td>8.4 GB</td>
+                    <td>2290</td>
+                    <td>14:25:40</td>
+                  </tr>
+                  <tr>
+                    <td>h2_switch_close_to_remote/episode_000320</td>
+                    <td><span class="badge waiting">等待稳定</span></td>
+                    <td>采集中</td>
+                    <td>-</td>
+                    <td>-</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="pagination" id="recordsPagination">
+              <button class="btn secondary small" id="prevRecordsPage" type="button">上一页</button>
+              <span id="recordsPageInfo">第 1 / 1 页</span>
+              <label class="page-jump">
+                <span>跳至</span>
+                <input id="recordsPageJump" type="number" min="1" value="1" />
+                <span>页</span>
+              </label>
+              <button class="btn secondary small" id="jumpRecordsPage" type="button">跳转</button>
+              <button class="btn secondary small" id="nextRecordsPage" type="button">下一页</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="/static/app.js?v=20260723-page-jump-input"></script>
+</body>
+</html>

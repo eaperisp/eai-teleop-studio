@@ -1,0 +1,25 @@
+[Unit]
+Description=Teleimager camera capture server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robot
+Group=robot
+SupplementaryGroups=video
+WorkingDirectory=/home/robot/eai-teleop-studio
+Environment=PYTHONUNBUFFERED=1
+Environment=XR_TELEOP_WEBRTC_SCHEME=https
+Environment=XR_TELEOP_CERT=/home/robot/eai-teleop-studio/config/cert.pem
+Environment=XR_TELEOP_KEY=/home/robot/eai-teleop-studio/config/key.pem
+ExecStart=/home/robot/miniconda3/envs/teleimager/bin/python -m teleimager.image_server --no-affinity
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+
+StandardOutput=append:/home/robot/eai-teleop-studio/logs/teleimager-camera-capture.service.log
+StandardError=append:/home/robot/eai-teleop-studio/logs/teleimager-camera-capture.service.log
+
+[Install]
+WantedBy=multi-user.target

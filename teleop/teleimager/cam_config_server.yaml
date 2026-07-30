@@ -15,9 +15,9 @@ head_camera:
   image_shape: [480, 640]
   binocular: false
   fps: 30
-  video_id: 22
+  video_id: null
   serial_number: CP0BB53000FS
-  physical_path: /sys/devices/pci0000:00/0000:00:14.0/usb3/3-4/3-4:1.4
+  physical_path: null
 
 torso_camera:
   enable_zmq: true
@@ -33,9 +33,9 @@ torso_camera:
   image_shape: [480, 640]
   binocular: false
   fps: 30
-  video_id: 12
+  video_id: null
   serial_number: CPCBC530002E
-  physical_path: /sys/devices/pci0000:00/0000:00:14.0/usb4/4-4/4-4:1.4
+  physical_path: null
 
 left_wrist_camera:
   enable_zmq: true
@@ -51,9 +51,9 @@ left_wrist_camera:
   image_shape: [480, 640]
   binocular: false
   fps: 30
-  video_id: 6
-  serial_number: CP0BB530009R
-  physical_path: /sys/devices/pci0000:00/0000:00:14.0/usb3/3-3/3-3:1.4
+  video_id: null
+  serial_number: CP0F463000HS
+  physical_path: null
 
 right_wrist_camera:
   enable_zmq: true
@@ -64,11 +64,11 @@ right_wrist_camera:
   type: opencv
   fourcc: YUYV
   direct_video_id: true
-  usb_interface: "1.0"
-  video_index: 4
+  usb_interface: "1.4"
+  video_index: 0
   image_shape: [480, 640]
   binocular: false
   fps: 30
-  video_id: 28
-  serial_number: 260523073107
-  physical_path: /sys/devices/pci0000:00/0000:00:14.0/usb4/4-2/4-2:1.0
+  video_id: null
+  serial_number: CP06563000E6
+  physical_path: null
