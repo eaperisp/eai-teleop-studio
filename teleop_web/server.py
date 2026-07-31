@@ -237,6 +237,9 @@ POSTPROCESS_TASK_KEYS = {
     "postprocess_image_size",
     "postprocess_image_encoding",
     "postprocess_jpeg_quality",
+    "postprocess_video_backend",
+    "postprocess_image_writer_processes",
+    "postprocess_image_writer_threads",
     "postprocess_resume",
     "postprocess_overwrite",
     "postprocess_batch_size",
@@ -794,6 +797,35 @@ def validate_jpeg_quality(value: Any) -> int:
     if quality < 1 or quality > 100:
         raise ValidationError("jpeg-quality 必须在 1-100 之间")
     return quality
+
+
+def validate_optional_int(
+    value: Any,
+    *,
+    field_name: str,
+    default: int | None = None,
+    minimum: int = 0,
+    maximum: int = 64,
+) -> int | None:
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return default
+    try:
+        number = int(text)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"{field_name} 必须是整数") from exc
+    if number < minimum or number > maximum:
+        raise ValidationError(f"{field_name} 必须在 {minimum}-{maximum} 之间")
+    return number
+
+
+def validate_video_backend(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", text):
+        raise ValidationError("video-backend 仅支持字母、数字、点、下划线和连字符")
+    return text
 
 
 def resolve_openpi_python(openpi_dir: Path) -> Path:
@@ -2930,11 +2962,18 @@ class TeleopManager:
         if kind == "convert":
             batch_size = argument_after("--batch-size")
             start_episode = argument_after("--start-episode")
+            writer_processes = argument_after("--image-writer-processes")
+            writer_threads = argument_after("--image-writer-threads")
             updates = {
                 "postprocess_repo_id": argument_after("--repo-id"),
                 "postprocess_robot_type": argument_after("--robot-type"),
                 "postprocess_camera_map": argument_after("--camera-map"),
                 "postprocess_image_size": argument_after("--image-size"),
+                "postprocess_image_encoding": argument_after("--image-encoding"),
+                "postprocess_jpeg_quality": argument_after("--jpeg-quality"),
+                "postprocess_video_backend": argument_after("--video-backend"),
+                "postprocess_image_writer_processes": int(writer_processes) if writer_processes and writer_processes.isdigit() else None,
+                "postprocess_image_writer_threads": int(writer_threads) if writer_threads and writer_threads.isdigit() else None,
                 "postprocess_resume": "--resume" in parts,
                 "postprocess_overwrite": "--overwrite" in parts,
                 "postprocess_batch_size": int(batch_size) if batch_size and batch_size.isdigit() else None,
@@ -3707,6 +3746,23 @@ class TeleopManager:
             image_size = validate_image_size(raw.get("image_size"))
             image_encoding = validate_image_encoding(raw.get("image_encoding"))
             jpeg_quality = validate_jpeg_quality(raw.get("jpeg_quality"))
+            video_backend = validate_video_backend(raw.get("video_backend"))
+            default_writer_processes = 2 if image_encoding == "video" else 0
+            default_writer_threads = 4 if image_encoding == "video" else 2
+            image_writer_processes = validate_optional_int(
+                raw.get("image_writer_processes"),
+                field_name="image-writer-processes",
+                default=default_writer_processes,
+                minimum=0,
+                maximum=8,
+            )
+            image_writer_threads = validate_optional_int(
+                raw.get("image_writer_threads"),
+                field_name="image-writer-threads",
+                default=default_writer_threads,
+                minimum=1,
+                maximum=32,
+            )
             validate_image_size_for_dataset(image_size, task_dir)
             validate_camera_map_sources(camera_map, task_dir, start_episode=script_start_episode)
             output_path = self.lerobot_home / repo_id
@@ -3743,10 +3799,12 @@ class TeleopManager:
                 "--jpeg-quality",
                 str(jpeg_quality),
                 "--image-writer-processes",
-                "0",
+                str(image_writer_processes),
                 "--image-writer-threads",
-                "2",
+                str(image_writer_threads),
             ]
+            if image_encoding == "video" and video_backend:
+                command.extend(["--video-backend", video_backend])
             cache_dir = self._postprocess_cache_dir("convert", repo_id)
             command.extend(["--cache-dir", str(cache_dir)])
             if overwrite:
@@ -3778,6 +3836,9 @@ class TeleopManager:
                 "image_size": image_size,
                 "image_encoding": image_encoding,
                 "jpeg_quality": jpeg_quality,
+                "video_backend": video_backend,
+                "image_writer_processes": image_writer_processes,
+                "image_writer_threads": image_writer_threads,
                 "resume": resume,
                 "overwrite": overwrite,
                 "start_episode": start_episode,
@@ -4818,6 +4879,17 @@ class TeleopManager:
                     "image_size": conversion_config.get("image_size") or item.get("postprocess_image_size") or "original",
                     "image_encoding": conversion_config.get("image_encoding") or item.get("postprocess_image_encoding") or "auto",
                     "jpeg_quality": conversion_config.get("jpeg_quality") or item.get("postprocess_jpeg_quality") or 95,
+                    "video_backend": conversion_config.get("video_backend") or item.get("postprocess_video_backend") or "",
+                    "image_writer_processes": (
+                        conversion_config.get("image_writer_processes")
+                        if conversion_config.get("image_writer_processes") is not None
+                        else item.get("postprocess_image_writer_processes")
+                    ),
+                    "image_writer_threads": (
+                        conversion_config.get("image_writer_threads")
+                        if conversion_config.get("image_writer_threads") is not None
+                        else item.get("postprocess_image_writer_threads")
+                    ),
                     "source_image_shape": list(self._dataset_image_shape_cached(task_dir) or []),
                     "resume": conversion_config.get("resume") if conversion_config.get("resume") is not None else item.get("postprocess_resume", False),
                     "overwrite": conversion_config.get("overwrite") if conversion_config.get("overwrite") is not None else item.get("postprocess_overwrite", True),
@@ -5043,6 +5115,9 @@ class TeleopManager:
                     "image_size": "original",
                     "image_encoding": "auto",
                     "jpeg_quality": 95,
+                    "video_backend": "",
+                    "image_writer_processes": "",
+                    "image_writer_threads": "",
                     "robot_type": "robot",
                     "openpi_dir": str(DEFAULT_OPENPI_DIR),
                     "lerobot_home": str(self.lerobot_home),

@@ -1,0 +1,15 @@
+@PROJECT_ROOT@/logs/app/*.log
+@PROJECT_ROOT@/logs/app/*.out
+{
+    su robot robot
+    daily
+    size 50M
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    dateext
+    dateformat -%Y%m%d
+}

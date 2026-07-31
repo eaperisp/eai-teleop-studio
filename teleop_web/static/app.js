@@ -1761,12 +1761,21 @@ function updateImageEncodingHint() {
   if (!form?.elements.image_encoding || !form?.elements.jpeg_quality) return;
   const encoding = form.elements.image_encoding.value || 'auto';
   form.elements.jpeg_quality.disabled = encoding === 'png' || encoding === 'video';
+  if (form.elements.video_backend) form.elements.video_backend.disabled = encoding !== 'video';
+  if (encoding === 'video') {
+    if (form.elements.image_writer_processes && !form.elements.image_writer_processes.value) {
+      form.elements.image_writer_processes.value = '2';
+    }
+    if (form.elements.image_writer_threads && !form.elements.image_writer_threads.value) {
+      form.elements.image_writer_threads.value = '4';
+    }
+  }
   if (hint) {
     hint.textContent = encoding === 'auto'
       ? '自动：原始 JPG 保存 JPG，原始 PNG 保存 PNG'
       : (encoding === 'jpg'
         ? '强制保存为 JPG/JPEG，使用 JPEG 质量参数'
-        : (encoding === 'video' ? '保存为 LeRobot Video MP4，适合大数据集和远端训练' : '强制保存为 PNG，JPEG 质量不生效'));
+        : (encoding === 'video' ? '保存为 LeRobot Video MP4；会启用 writer 并发，仍建议先小批量验证' : '强制保存为 PNG，JPEG 质量不生效'));
   }
 }
 function showPostprocess(task) {
@@ -1788,6 +1797,9 @@ function showPostprocess(task) {
   form.elements.image_size.value = status.image_size || defaults.image_size || 'original';
   form.elements.image_encoding.value = status.image_encoding || defaults.image_encoding || 'auto';
   form.elements.jpeg_quality.value = status.jpeg_quality || defaults.jpeg_quality || 95;
+  if (form.elements.video_backend) form.elements.video_backend.value = status.video_backend || defaults.video_backend || '';
+  if (form.elements.image_writer_processes) form.elements.image_writer_processes.value = status.image_writer_processes ?? defaults.image_writer_processes ?? '';
+  if (form.elements.image_writer_threads) form.elements.image_writer_threads.value = status.image_writer_threads ?? defaults.image_writer_threads ?? '';
   updateImageSizeHint(task);
   updateImageEncodingHint();
   form.elements.config_name.value = status.config_name || defaults.openpi_config_name || `${defaults.config_prefix || 'pi05'}_${task.name}`;
@@ -1822,7 +1834,7 @@ function updatePostprocessModalStatus(task, paths = {}) {
   const subtitleLines = [
     `数据目录：${escapeHtml(`${appState.dataset_root}/${task.name}`)}`,
     `相机映射：${escapeHtml(cameraSlotsToMap(form) || '全部 none')}（更新：${escapeHtml(formatTime(status.camera_map_updated_at))}）`,
-    `转换选项：${form.elements.resume?.checked ? '断点续转，回滚最近 2 条' : '覆盖/从起始位置转换'}；image-size：${escapeHtml(form.elements.image_size?.value || 'original')}；image-encoding：${escapeHtml(form.elements.image_encoding?.value || 'auto')}；jpeg-quality：${escapeHtml(form.elements.jpeg_quality?.value || '95')}；起始 episode：${escapeHtml(form.elements.start_episode?.value || '自动')}；batch-size：${escapeHtml(form.elements.batch_size?.value || '单批全量')}；填写后会自动逐批转完`,
+    `转换选项：${form.elements.resume?.checked ? '断点续转，回滚最近 2 条' : '覆盖/从起始位置转换'}；image-size：${escapeHtml(form.elements.image_size?.value || 'original')}；image-encoding：${escapeHtml(form.elements.image_encoding?.value || 'auto')}；jpeg-quality：${escapeHtml(form.elements.jpeg_quality?.value || '95')}；writer：${escapeHtml(form.elements.image_writer_processes?.value || '默认')}/${escapeHtml(form.elements.image_writer_threads?.value || '默认')}；起始 episode：${escapeHtml(form.elements.start_episode?.value || '自动')}；batch-size：${escapeHtml(form.elements.batch_size?.value || '单批全量')}；填写后会自动逐批转完`,
     `LeRobot：${escapeHtml(lerobotDir)}（${convertStatusText(status)}${escapeHtml(lerobotEpisodes)}，开始：${escapeHtml(formatTime(status.convert_started_at))}，完成：${escapeHtml(formatTime(status.converted_at))}，失败：${escapeHtml(formatTime(status.convert_failed_at))}）`,
     `归一化：${escapeHtml(normStatsDir)}（${normalizeStatusText(status)}，开始：${escapeHtml(formatTime(status.normalize_started_at))}，完成：${escapeHtml(formatTime(status.normalized_at))}，失败：${escapeHtml(formatTime(status.normalize_failed_at))}）`,
     `数据包：${escapeHtml(status.last_data_package || '—')}（${dataPackageStatusText(status)}，开始：${escapeHtml(formatTime(status.data_package_started_at))}，完成：${escapeHtml(formatTime(status.data_packaged_at))}，失败：${escapeHtml(formatTime(status.data_package_failed_at))}）`,
@@ -2030,6 +2042,9 @@ $('#postprocessForm').addEventListener('submit', async event => {
     image_size: f.get('image_size'),
     image_encoding: f.get('image_encoding'),
     jpeg_quality: f.get('jpeg_quality'),
+    video_backend: f.get('video_backend'),
+    image_writer_processes: f.get('image_writer_processes'),
+    image_writer_threads: f.get('image_writer_threads'),
     resume: f.has('resume'),
     start_episode: f.get('start_episode'),
     batch_size: f.get('batch_size'),

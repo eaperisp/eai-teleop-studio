@@ -15,7 +15,7 @@ if [[ ! -f "${SERVICE_SRC}" ]]; then
   exit 1
 fi
 
-mkdir -p "${PROJECT_ROOT}/config" "${PROJECT_ROOT}/data" "${PROJECT_ROOT}/logs"
+mkdir -p "${PROJECT_ROOT}/config" "${PROJECT_ROOT}/data" "${PROJECT_ROOT}/logs/app"
 
 if [[ ! -f "${ENV_FILE}" && -f "${ENV_EXAMPLE}" ]]; then
   cp "${ENV_EXAMPLE}" "${ENV_FILE}"

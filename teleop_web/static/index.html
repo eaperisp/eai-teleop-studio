@@ -245,6 +245,9 @@
           <label><span>image-size</span><select name="image_size"><option value="original">原始尺寸</option><option value="240x320">240x320</option></select><small id="imageSizeHint">默认保持原始尺寸</small></label>
           <label><span>图像/视频格式 image-encoding</span><select name="image_encoding"><option value="auto">自动：跟随原始格式</option><option value="jpg">JPG/JPEG</option><option value="png">PNG</option><option value="video">Video MP4</option></select><small id="imageEncodingHint">原始 JPG 则保存 JPG；原始 PNG 则保存 PNG；Video 生成 LeRobot mp4</small></label>
           <label><span>JPEG 质量 jpeg-quality</span><input name="jpeg_quality" type="number" min="1" max="100" value="95"><small>仅 JPG/JPEG 生效，默认 95</small></label>
+          <label><span>video-backend 可选</span><input name="video_backend" placeholder="留空使用 LeRobot 默认"><small>仅 Video MP4 生效，不确定就留空</small></label>
+          <label><span>writer-processes</span><input name="image_writer_processes" type="number" min="0" max="8" placeholder="video 默认 2，图片默认 0"><small>Video 转换提速；内存紧张时调小</small></label>
+          <label><span>writer-threads</span><input name="image_writer_threads" type="number" min="1" max="32" placeholder="video 默认 4，图片默认 2"><small>Video 建议 4-8，视 CPU/IO 调整</small></label>
           <label><span>OpenPI config-name</span><input name="config_name" placeholder="pi05_<任务名>" required><small>用于 OpenPI 归一化配置</small></label>
           <label><span>OpenPI 目录</span><input name="openpi_dir" placeholder="~/openpi" required><small>OpenPI 项目所在目录</small></label>
           <label><span>转换起始 episode</span><input name="start_episode" type="number" min="0" placeholder="默认 0；断点续转自动计算"><small>留空自动从 0 或断点位置开始</small></label>

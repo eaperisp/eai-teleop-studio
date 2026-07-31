@@ -16,7 +16,7 @@ class SyncConfig:
     ssh_password: str = os.environ.get("ROBOT_SYNC_SSH_PASSWORD", "")
     config_file: str = os.environ.get("ROBOT_SYNC_CONFIG_FILE", "config/robot_sync_config.json")
     records_file: str = os.environ.get("ROBOT_SYNC_RECORDS_FILE", "data/robot_sync_records.json")
-    log_file: str = os.environ.get("ROBOT_SYNC_LOG_FILE", "logs/robot_sync.log")
+    log_file: str = os.environ.get("ROBOT_SYNC_LOG_FILE", "logs/app/robot_sync.log")
     excludes: list[str] = field(
         default_factory=lambda: [
             "*.zip",

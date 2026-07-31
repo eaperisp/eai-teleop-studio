@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=robot
 Group=robot
-WorkingDirectory=/home/robot/eai-teleop-studio
+WorkingDirectory=@PROJECT_ROOT@
 Environment=HOME=/home/robot
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONNOUSERSITE=1
@@ -21,6 +21,9 @@ ExecStart=/home/robot/miniconda3/envs/teleop/bin/python3 -m teleop_web.server --
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20
+
+StandardOutput=append:@PROJECT_ROOT@/logs/app/xr-teleop-web.service.log
+StandardError=append:@PROJECT_ROOT@/logs/app/xr-teleop-web.service.log
 
 [Install]
 WantedBy=multi-user.target

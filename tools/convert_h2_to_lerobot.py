@@ -158,14 +158,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--image-writer-processes",
         type=int,
-        default=0,
-        help="LeRobot image writer worker processes. Keep 0 to avoid orphan writer processes.",
+        default=None,
+        help="LeRobot image writer worker processes. Defaults to 0 for image and 2 for video.",
     )
     parser.add_argument(
         "--image-writer-threads",
         type=int,
-        default=2,
-        help="LeRobot image writer threads. Keep low to avoid OOM on long image datasets.",
+        default=None,
+        help="LeRobot image writer threads. Defaults to 2 for image and 4 for video.",
     )
     parser.add_argument(
         "--keep-external-images",
@@ -1150,6 +1150,12 @@ def main() -> int:
         except (RuntimeError, ValueError) as exc:
             print(str(exc), file=sys.stderr)
             return 2
+    image_writer_processes = args.image_writer_processes
+    image_writer_threads = args.image_writer_threads
+    if image_writer_processes is None:
+        image_writer_processes = 2 if visual_storage == "video" else 0
+    if image_writer_threads is None:
+        image_writer_threads = 4 if visual_storage == "video" else 2
     source_image_shape = infer_image_shape(schema_episodes, sample_frame, sample_episode_dir)
     if image_size is not None and (image_size[0] > source_image_shape[0] or image_size[1] > source_image_shape[1]):
         print(
@@ -1190,6 +1196,12 @@ def main() -> int:
     print(f"Source image shape: {source_image_shape[0]}x{source_image_shape[1]}")
     print(f"Output image shape: {output_image_shape[0]}x{output_image_shape[1]}")
     print(f"Image keys: {', '.join(img_features) if img_features else '(none)'}")
+    print(
+        "Image writer: "
+        f"processes={image_writer_processes}, threads={image_writer_threads}, "
+        f"video_backend={args.video_backend or 'default'}",
+        flush=True,
+    )
     print(f"H2 URDF non-fixed joints with limits: {len(joint_limits)}")
     if trim_report.get("enabled"):
         print(
@@ -1281,8 +1293,8 @@ def main() -> int:
         "robot_type": args.robot_type,
         "fps": fps,
         "features": features,
-        "image_writer_threads": max(1, args.image_writer_threads),
-        "image_writer_processes": max(0, args.image_writer_processes),
+        "image_writer_threads": max(1, image_writer_threads),
+        "image_writer_processes": max(0, image_writer_processes),
     }
     if "root" in inspect.signature(LeRobotDataset.create).parameters:
         create_kwargs["root"] = output_path

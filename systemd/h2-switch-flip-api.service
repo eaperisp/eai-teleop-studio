@@ -1,0 +1,24 @@
+[Unit]
+Description=H2 switch flip API service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robot
+Group=robot
+WorkingDirectory=@PROJECT_ROOT@
+Environment=HOME=/home/robot
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONNOUSERSITE=1
+Environment=PATH=/home/robot/miniconda3/envs/teleop/bin:/home/robot/miniconda3/condabin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/robot/miniconda3/envs/teleop/bin/python3 api/h2_switch_flip_api.py --host 0.0.0.0 --port 17002 --log-file logs/app/h2_switch_flip_api_17002.log
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+StandardOutput=append:@PROJECT_ROOT@/logs/app/h2_switch_flip_api_17002.nohup.out
+StandardError=append:@PROJECT_ROOT@/logs/app/h2_switch_flip_api_17002.nohup.out
+
+[Install]
+WantedBy=multi-user.target
