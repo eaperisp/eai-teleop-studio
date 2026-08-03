@@ -518,7 +518,9 @@ if __name__ == '__main__':
         record_camera_names = [
             camera_name
             for camera_name, camera_cfg in camera_config.items()
-            if isinstance(camera_cfg, dict) and camera_cfg.get('enable_zmq')
+            if isinstance(camera_cfg, dict)
+            and camera_cfg.get('enable_zmq')
+            and camera_cfg.get('data_format', 'jpeg') == 'jpeg'
         ]
         logger_mp.info(f"Recording camera streams from config order: {record_camera_names}")
         xr_quad_view = (
@@ -803,6 +805,7 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
+            external_arm_target = get_external_arm_target()
             if args.ee in ("dex3", "inspire_ftp", "inspire_dfx", "brainco")  and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
@@ -831,21 +834,36 @@ if __name__ == '__main__':
                 pass
             with xr_motion_data_ready.get_lock():
                 xr_motion_data_ready.value = tele_data.motion_data_ready
+            if args.record:
+                # Keep recorder readiness fresh even when XR motion is not valid.
+                # The motion gate below may skip arm control, but the web console
+                # still needs an accurate save/record-ready state.
+                READY = recorder.is_ready()
 
-            if not tele_data.motion_data_ready:
+            # Always read state before the motion gate so recording can continue
+            # even if XR motion temporarily drops out. Control remains gated below.
+            current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
+            current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
+            if arm_trace_start_q is None:
+                arm_trace_start_q = current_lr_arm_q.copy()
+
+            control_input_ready = tele_data.motion_data_ready or external_arm_target is not None
+            if not tele_data.motion_data_ready and external_arm_target is None:
                 waiting_motion_log_count += 1
                 if waiting_motion_log_count % max(1, int(args.frequency)) == 0:
                     logger_mp.warning(
                         "Waiting for valid XR motion data; skipping arm IK/control. "
                         f"input_mode={args.input_mode}, arm_reference_mode={args.arm_reference_mode}"
                     )
-                time_elapsed = time.time() - start_time
-                time.sleep(max(0, (1 / args.frequency) - time_elapsed))
-                continue
-            waiting_motion_log_count = 0
+                if not RECORD_RUNNING:
+                    time_elapsed = time.time() - start_time
+                    time.sleep(max(0, (1 / args.frequency) - time_elapsed))
+                    continue
+            else:
+                waiting_motion_log_count = 0
              
             # high level control
-            if args.input_mode == "controller" and args.motion:
+            if args.input_mode == "controller" and args.motion and tele_data.motion_data_ready:
                 # quit teleoperate
                 if tele_data.right_ctrl_aButton:
                     START = False
@@ -868,23 +886,20 @@ if __name__ == '__main__':
                         logger_mp.warning(f"Loco {loco_wrapper.robot} Move returned code={move_code}")
                         loco_last_warning_time = now
 
-            # get current robot state data.
-            current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
-            current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
-            if arm_trace_start_q is None:
-                arm_trace_start_q = current_lr_arm_q.copy()
-
             # solve ik using motor data and wrist pose, then use ik results to control arms.
             time_ik_start = time.time()
-            external_arm_target = get_external_arm_target()
-            if external_arm_target is not None:
+            if not control_input_ready:
+                sol_q = current_lr_arm_q.copy()
+                sol_tauff = np.zeros_like(sol_q)
+            elif external_arm_target is not None:
                 sol_q = external_arm_target
                 sol_tauff = np.zeros_like(sol_q)
             else:
                 sol_q, sol_tauff  = arm_ik.solve_ik(tele_data.left_wrist_pose, tele_data.right_wrist_pose, current_lr_arm_q, current_lr_arm_dq)
             time_ik_end = time.time()
             logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
-            arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+            if control_input_ready:
+                arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
             if ik_replay_pusher is not None and ik_replay_pusher.enabled:
                 ik_replay_pusher.publish(build_ik_replay_live_payload(
                     robot=args.arm.lower(),

@@ -321,12 +321,46 @@ class TeleImage:
         size = len(self.jpg) if self.jpg else 0
         state = "DISABLED" if self._bgr is TeleImage._NOT_SET else ("FAILED" if self._bgr is None else "OK")
         return f"TeleImage(fps={self.fps:.1f}, jpg_byte_size={size}, bgr_state={state})"
+
+class TeleDepth:
+    __slots__ = ['raw', '_depth', 'fps']
+
+    def __init__(self, fps: float, raw: Optional[bytes], depth: Optional[np.ndarray]):
+        self.fps = fps
+        self.raw = raw
+        self._depth = depth
+
+    @property
+    def depth(self) -> Optional[np.ndarray]:
+        return self._depth
+
+    def __bool__(self):
+        return bool(self.raw)
+
+    def __iter__(self):
+        yield self.fps
+        yield self.raw
+        yield self._depth
+
+    def __repr__(self):
+        size = len(self.raw) if self.raw else 0
+        state = "OK" if self._depth is not None else "EMPTY"
+        return f"TeleDepth(fps={self.fps:.1f}, raw_byte_size={size}, depth_state={state})"
         
 
 class ZMQ_SubscriberThread(threading.Thread):
     """Thread that owns a SUB socket and handles receiving the latest message."""
 
-    def __init__(self, host: str, port: int, context: Optional[zmq.Context] = None, request_bgr: bool = False):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        context: Optional[zmq.Context] = None,
+        request_bgr: bool = False,
+        data_format: str = "jpeg",
+        depth_shape: Optional[Tuple[int, int]] = None,
+        depth_dtype: str = "uint16",
+    ):
         """Initialize subscriber thread.
 
         Args:
@@ -339,6 +373,9 @@ class ZMQ_SubscriberThread(threading.Thread):
         self._port = port
         self._context = context or zmq.Context.instance()
         self._request_bgr = request_bgr
+        self._data_format = data_format
+        self._depth_shape = tuple(depth_shape) if depth_shape is not None else None
+        self._depth_dtype = np.dtype(depth_dtype)
 
         self._socket = None
         self._running = True
@@ -352,6 +389,7 @@ class ZMQ_SubscriberThread(threading.Thread):
         self._has_marked_stale = False
 
         self._jpg_3ring_buffer = TripleRingBuffer()
+        self._depth_3ring_buffer = TripleRingBuffer()
         self._fps_monitor = SimpleFPSMonitor(window_size=10)
         if self._request_bgr:
             self._bgr_3ring_buffer = TripleRingBuffer()
@@ -362,6 +400,22 @@ class ZMQ_SubscriberThread(threading.Thread):
             self._bgr_3ring_buffer = None
             self._bgr_decode_queue = None
             self._decoder_thread = None
+
+    def _decode_depth(self, raw_bytes):
+        if raw_bytes is None or self._depth_shape is None:
+            return None
+        try:
+            depth = np.frombuffer(raw_bytes, dtype=self._depth_dtype)
+            expected_size = int(self._depth_shape[0]) * int(self._depth_shape[1])
+            if depth.size != expected_size:
+                logger_mp.warning(
+                    f"[ZMQ_SubscriberThread] Depth frame size mismatch: got {depth.size}, expected {expected_size}"
+                )
+                return None
+            return depth.reshape(self._depth_shape)
+        except Exception as e:
+            logger_mp.warning(f"[ZMQ_SubscriberThread] Failed to decode depth frame: {e}")
+            return None
 
     def _decode_image(self, jpg_bytes):
         """Decode JPEG bytes to OpenCV image."""
@@ -393,7 +447,7 @@ class ZMQ_SubscriberThread(threading.Thread):
     # --------------------------------------------------------
     # public api
     # --------------------------------------------------------
-    def recv(self) -> TeleImage:
+    def recv(self):
         """Get the latest received message.
 
         Returns:
@@ -401,6 +455,10 @@ class ZMQ_SubscriberThread(threading.Thread):
         """
         current_fps = self._fps_monitor.fps
         jpg_data = self._jpg_3ring_buffer.read()
+        if self._data_format == "depth_z16":
+            depth_data = self._depth_3ring_buffer.read()
+            return TeleDepth(fps=current_fps, raw=jpg_data, depth=depth_data)
+
         if not self._request_bgr:
             return TeleImage(fps=current_fps, jpg=jpg_data)
 
@@ -438,6 +496,8 @@ class ZMQ_SubscriberThread(threading.Thread):
                         img_bytes = self._socket.recv()
                         # write to 3-ring-buffer
                         self._jpg_3ring_buffer.write(img_bytes)
+                        if self._data_format == "depth_z16":
+                            self._depth_3ring_buffer.write(self._decode_depth(img_bytes))
                         self._last_message_at = time.monotonic()
                         self._has_marked_stale = False
                         # enqueue for decoding if needed
@@ -460,6 +520,8 @@ class ZMQ_SubscriberThread(threading.Thread):
                     if now - self._last_message_at >= self._stale_timeout:
                         if not self._has_marked_stale:
                             self._jpg_3ring_buffer.write(None)
+                            if self._data_format == "depth_z16":
+                                self._depth_3ring_buffer.write(None)
                             if self._request_bgr:
                                 try:
                                     if self._bgr_decode_queue.full():
@@ -494,16 +556,32 @@ class ZMQ_SubscriberManager:
     """Centralized management of ZMQ subscribers."""
 
     _instance: Optional["ZMQ_SubscriberManager"] = None
-    _subscriber_threads: Dict[Tuple[str, int], ZMQ_SubscriberThread] = {}
+    _subscriber_threads: Dict[Tuple[Any, ...], ZMQ_SubscriberThread] = {}
     _lock = threading.Lock()
     _running = True
 
     def __init__(self):
         self._context = zmq.Context()
 
-    def _create_subscriber_thread(self, host: str, port: int, request_bgr: bool = False) -> ZMQ_SubscriberThread:
+    def _create_subscriber_thread(
+        self,
+        host: str,
+        port: int,
+        request_bgr: bool = False,
+        data_format: str = "jpeg",
+        depth_shape: Optional[Tuple[int, int]] = None,
+        depth_dtype: str = "uint16",
+    ) -> ZMQ_SubscriberThread:
         try:
-            subscriber_thread = ZMQ_SubscriberThread(host, port, self._context, request_bgr)
+            subscriber_thread = ZMQ_SubscriberThread(
+                host,
+                port,
+                self._context,
+                request_bgr,
+                data_format=data_format,
+                depth_shape=depth_shape,
+                depth_dtype=depth_dtype,
+            )
             subscriber_thread.start()
             # Wait for the thread to start and socket to be ready
             if not subscriber_thread._wait_for_start(timeout=1.0):
@@ -513,11 +591,26 @@ class ZMQ_SubscriberManager:
             logger_mp.error(f"Failed to create subscriber thread for {host}:{port}: {e}")
             raise 
 
-    def _get_subscriber_thread(self, host: str, port: int, request_bgr: bool = False) -> ZMQ_SubscriberThread:
-        key = (host, port)
+    def _get_subscriber_thread(
+        self,
+        host: str,
+        port: int,
+        request_bgr: bool = False,
+        data_format: str = "jpeg",
+        depth_shape: Optional[Tuple[int, int]] = None,
+        depth_dtype: str = "uint16",
+    ) -> ZMQ_SubscriberThread:
+        key = (host, port, request_bgr, data_format, tuple(depth_shape) if depth_shape is not None else None, depth_dtype)
         with self._lock:
             if key not in self._subscriber_threads:
-                self._subscriber_threads[key] = self._create_subscriber_thread(host, port, request_bgr)
+                self._subscriber_threads[key] = self._create_subscriber_thread(
+                    host,
+                    port,
+                    request_bgr,
+                    data_format=data_format,
+                    depth_shape=depth_shape,
+                    depth_dtype=depth_dtype,
+                )
             return self._subscriber_threads[key]
         
     # --------------------------------------------------------
@@ -546,6 +639,20 @@ class ZMQ_SubscriberManager:
             raise RuntimeError("SubscriberManager is closed.")
 
         subscriber_thread = self._get_subscriber_thread(host, port, request_bgr=request_bgr)
+        return subscriber_thread.recv()
+
+    def subscribe_depth(self, host: str, port: int, depth_shape: Tuple[int, int], depth_dtype: str = "uint16") -> TeleDepth:
+        if not self._running:
+            raise RuntimeError("SubscriberManager is closed.")
+
+        subscriber_thread = self._get_subscriber_thread(
+            host,
+            port,
+            request_bgr=False,
+            data_format="depth_z16",
+            depth_shape=depth_shape,
+            depth_dtype=depth_dtype,
+        )
         return subscriber_thread.recv()
 
     def close(self) -> None:
@@ -719,7 +826,15 @@ class ImageClient:
         for camera_name, camera_cfg in self._cam_config.items():
             if not isinstance(camera_cfg, dict) or not camera_cfg.get('enable_zmq'):
                 continue
-            self._subscriber_manager.subscribe(self._host, camera_cfg['zmq_port'], request_bgr=self._request_bgr)
+            if camera_cfg.get("data_format") == "depth_z16":
+                self._subscriber_manager.subscribe_depth(
+                    self._host,
+                    camera_cfg['zmq_port'],
+                    tuple(camera_cfg["image_shape"]),
+                    camera_cfg.get("depth_dtype", "uint16"),
+                )
+            else:
+                self._subscriber_manager.subscribe(self._host, camera_cfg['zmq_port'], request_bgr=self._request_bgr)
 
         if not self._cam_config['head_camera']['enable_zmq'] and not self._cam_config['head_camera']['enable_webrtc']:
             logger_mp.warning("[Image Client] NOTICE! Head camera is not enabled on both ZMQ and WebRTC.")
@@ -734,15 +849,27 @@ class ImageClient:
         return [
             camera_name
             for camera_name, camera_cfg in self._cam_config.items()
-            if isinstance(camera_cfg, dict) and camera_cfg.get('enable_zmq')
+            if isinstance(camera_cfg, dict) and camera_cfg.get('enable_zmq') and camera_cfg.get("data_format", "jpeg") == "jpeg"
         ]
 
     def get_camera_frame(self, camera_name: str):
         camera_cfg = self._cam_config[camera_name]
         return self._subscriber_manager.subscribe(self._host, camera_cfg['zmq_port'], request_bgr=self._request_bgr)
 
+    def get_depth_frame(self, camera_name: str = "head_depth_camera"):
+        camera_cfg = self._cam_config[camera_name]
+        return self._subscriber_manager.subscribe_depth(
+            self._host,
+            camera_cfg['zmq_port'],
+            tuple(camera_cfg["image_shape"]),
+            camera_cfg.get("depth_dtype", "uint16"),
+        )
+
     def get_head_frame(self):
         return self.get_camera_frame('head_camera')
+
+    def get_head_depth_frame(self):
+        return self.get_depth_frame('head_depth_camera')
 
     def get_torso_frame(self):
         return self.get_camera_frame('torso_camera')

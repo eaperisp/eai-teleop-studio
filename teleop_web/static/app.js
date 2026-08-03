@@ -13,6 +13,18 @@ const DEFAULT_OSS_PACKAGE_ROOT = '/data03/data/datasets/lerobot/packages';
 const DEFAULT_OSS_ROOT = 'oss://bwton-idc/openpi';
 const DEFAULT_MODEL_DOWNLOAD_ROOT = '/data03/data/models/openpi_downloads';
 const DEFAULT_OSS_TASK_NAME = 'h2_switch_close_to_remote_merged';
+const DEFAULT_TRAINING_TASK_NAME = 'h2_switch_close_to_remote';
+const TRAINING_COMMAND_DEFAULTS = {
+  configName: 'pi05_h2_lerobot',
+  actionDim: '32',
+  realActionDim: '14',
+  actionHorizon: '16',
+  fsdpDevices: '2',
+  batchSize: '32',
+  numTrainSteps: '50000',
+  saveInterval: '5000',
+  keepPeriod: '25000',
+};
 const TASK_PAGE_SIZE = 10;
 let dataPreviewState = {preview:null,index:0,taskId:null,episode:null};
 let dataListState = {taskId:'',page:1,pageSize:50,total:0,episodes:[],tasks:[],loading:false};
@@ -25,6 +37,9 @@ let sidebarCollapsed = localStorage.getItem('teleop.sidebarCollapsed') === '1';
 let editingTrainingSetId = null;
 let expandedTrainingSetIds = new Set(JSON.parse(localStorage.getItem('teleop.expandedTrainingSets') || '[]'));
 let ossTransferState = {remoteUri:'',remoteEntries:[],loading:false,localDir:'',taskName:''};
+let runtimePending = null;
+let fastRefreshTimer = null;
+const pageJumpTimers = {};
 
 function normalizeStaticLabels() {
   if (activeView === 'trainingDoc') {
@@ -110,6 +125,49 @@ function showNotice(message, kind = 'error') {
   const node = $('#notice'); node.textContent = message; node.className = `notice visible ${kind}`;
   clearTimeout(showNotice.timer); showNotice.timer = setTimeout(() => node.className = 'notice', 4500);
 }
+function scheduleFastRefresh() {
+  clearTimeout(fastRefreshTimer);
+  if (!runtimePending) return;
+  fastRefreshTimer = setTimeout(async () => {
+    try {
+      await refresh(true, {auto:true});
+    } finally {
+      if (runtimePending) scheduleFastRefresh();
+    }
+  }, 700);
+}
+function setRuntimePending(type, message, options = {}) {
+  runtimePending = {
+    type,
+    message,
+    taskId: options.taskId ?? activeTaskId,
+    startedAt: Date.now(),
+    timeoutMs: options.timeoutMs || 12000,
+    mode: options.mode || '',
+  };
+  const status = $('#processStatus');
+  if (status) status.textContent = message;
+  showNotice(message, 'success');
+  scheduleFastRefresh();
+}
+function clearRuntimePending() {
+  runtimePending = null;
+  clearTimeout(fastRefreshTimer);
+  fastRefreshTimer = null;
+}
+function runtimePendingResolved(process, teleop) {
+  if (!runtimePending) return true;
+  const taskMatches = runtimePending.taskId == null || String(process.task?.id ?? '') === String(runtimePending.taskId);
+  if (runtimePending.type === 'process_start') return Boolean(process.running && teleop.online && taskMatches);
+  if (runtimePending.type === 'teleop_start') return Boolean(process.running && teleop.START && taskMatches);
+  if (runtimePending.type === 'record_start') return Boolean(process.running && teleop.RECORD_RUNNING && taskMatches);
+  if (runtimePending.type === 'record_stop') return Boolean(process.running && !teleop.RECORD_RUNNING && taskMatches);
+  if (runtimePending.type === 'process_stop') return Boolean(!process.running);
+  return true;
+}
+function runtimePendingTimedOut() {
+  return runtimePending && Date.now() - runtimePending.startedAt > runtimePending.timeoutMs;
+}
 async function copyText(value) {
   const text = String(value || '');
   if (!text) return showNotice('没有可复制的内容');
@@ -151,6 +209,15 @@ function formatTime(value) {
 function episodeNumber(value) {
   const match = String(value || '').match(/^episode_(\d+)$/);
   return match ? Number(match[1]) : 0;
+}
+function clampPage(value, totalPages) {
+  const maxPage = Math.max(1, Number(totalPages) || 1);
+  const page = Math.trunc(Number(value) || 1);
+  return Math.min(maxPage, Math.max(1, page));
+}
+function debouncePageJump(key, callback, delay = 500) {
+  clearTimeout(pageJumpTimers[key]);
+  pageJumpTimers[key] = setTimeout(callback, delay);
 }
 function formatBytes(value) {
   const size = Number(value) || 0;
@@ -392,6 +459,9 @@ function renderTasks() {
     $('#taskPageInfo').textContent = `第 ${taskPage} / ${totalPages} 页，共 ${tasks.length} 个任务`;
     $('#prevTaskPage').disabled = taskPage <= 1;
     $('#nextTaskPage').disabled = taskPage >= totalPages;
+    const pageJump = $('#taskPageJump');
+    if (pageJump && document.activeElement !== pageJump) pageJump.value = String(taskPage);
+    if (pageJump) pageJump.max = String(totalPages);
   }
 }
 function signatureText(profile, kind) {
@@ -555,6 +625,9 @@ function renderDataList() {
   $('#dataListPageInfo').textContent = `第 ${dataListState.page || 1} / ${totalPages} 页，共 ${dataListState.total || 0} 条`;
   $('#prevDataListPage').disabled = (dataListState.page || 1) <= 1;
   $('#nextDataListPage').disabled = (dataListState.page || 1) >= totalPages;
+  const pageJump = $('#dataListPageJump');
+  if (pageJump && document.activeElement !== pageJump) pageJump.value = String(dataListState.page || 1);
+  if (pageJump) pageJump.max = String(totalPages);
   if (subtitle) {
     const task = tasks.find(item => String(item.id) === selected);
     subtitle.textContent = task ? `${task.name} · ${dataListState.dataset_dir || ''}` : '查看每条 episode 的帧数、文件数、大小并执行预览/删除';
@@ -710,8 +783,8 @@ function taskByName(taskName) {
   return (appState.tasks || []).find(task => task.name === name) || null;
 }
 function manualDerivedValues(taskName, values = {}) {
-  const task = taskName || 'h2_switch_close_to_remote';
-  const numTrainSteps = values.numTrainSteps || '50000';
+  const task = taskName || DEFAULT_TRAINING_TASK_NAME;
+  const numTrainSteps = values.numTrainSteps || TRAINING_COMMAND_DEFAULTS.numTrainSteps;
   const expName = `pi05_${task}_${numTrainSteps}`;
   const packageTimestamp = values.packageTimestamp || currentTimestampText();
   const dataPackageSuffix = String(values.dataPackage || '').match(/(_lerobot_.+\.(?:tar\.gz|tgz))$/i)?.[1] || '_lerobot_YYYYMMDD_HHMMSS.tar.gz';
@@ -729,7 +802,7 @@ function manualTaskOptions(selectedTaskName = '') {
   if (selected && !names.includes(selected)) names.unshift(selected);
   return names.length
     ? names.map(name => `<option value="${escapeHtml(name)}" ${name === selected ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')
-    : `<option value="${escapeHtml(selected || 'h2_switch_close_to_remote')}">${escapeHtml(selected || 'h2_switch_close_to_remote')}</option>`;
+    : `<option value="${escapeHtml(selected || DEFAULT_TRAINING_TASK_NAME)}">${escapeHtml(selected || DEFAULT_TRAINING_TASK_NAME)}</option>`;
 }
 function shellQuote(value) {
   const text = String(value || '');
@@ -770,11 +843,11 @@ function renderTemplateBody(body, values) {
   });
 }
 function buildManualValues(input) {
-  const task = input.taskName || 'h2_switch_close_to_remote';
+  const task = input.taskName || DEFAULT_TRAINING_TASK_NAME;
   const derived = manualDerivedValues(task, input);
   const exp = input.expName || derived.expName;
-  const numTrainSteps = input.numTrainSteps || '50000';
-  const modelTrainDir = input.modelTrainDir || String(Math.max(0, (Number(numTrainSteps) || 50000) - 1));
+  const numTrainSteps = input.numTrainSteps || TRAINING_COMMAND_DEFAULTS.numTrainSteps;
+  const modelTrainDir = input.modelTrainDir || String(Math.max(0, (Number(numTrainSteps) || Number(TRAINING_COMMAND_DEFAULTS.numTrainSteps)) - 1));
   const packageTimestamp = input.packageTimestamp || currentTimestampText();
   const datasetFile = input.dataPackage || derived.dataPackage;
   const modelName = input.modelFile || `${exp}_${packageTimestamp}.tar.gz`;
@@ -798,18 +871,18 @@ function buildManualValues(input) {
     CHECKPOINT_DIR: input.checkpointDir || '/home/ubuntu/models/openpi/checkpoints',
     LOG_DIR: input.logDir || '/home/ubuntu/models/openpi/logs',
     REPO_ID: input.repoId || derived.repoId,
-    CONFIG_NAME: input.configName || 'pi05_h2_lerobot',
+    CONFIG_NAME: input.configName || TRAINING_COMMAND_DEFAULTS.configName,
     EXP_NAME: exp,
-    ACTION_DIM: input.actionDim || '32',
-    REAL_ACTION_DIM: input.realActionDim || '16',
-    ACTION_HORIZON: input.actionHorizon || '16',
-    FSDP_DEVICES: input.fsdpDevices || '2',
-    BATCH_SIZE: input.batchSize || '32',
+    ACTION_DIM: input.actionDim || TRAINING_COMMAND_DEFAULTS.actionDim,
+    REAL_ACTION_DIM: input.realActionDim || TRAINING_COMMAND_DEFAULTS.realActionDim,
+    ACTION_HORIZON: input.actionHorizon || TRAINING_COMMAND_DEFAULTS.actionHorizon,
+    FSDP_DEVICES: input.fsdpDevices || TRAINING_COMMAND_DEFAULTS.fsdpDevices,
+    BATCH_SIZE: input.batchSize || TRAINING_COMMAND_DEFAULTS.batchSize,
     NUM_TRAIN_STEPS: numTrainSteps,
     MODEL_TRAIN_DIR: modelTrainDir,
     PACKAGE_TIMESTAMP: packageTimestamp,
-    SAVE_INTERVAL: input.saveInterval || '5000',
-    KEEP_PERIOD: input.keepPeriod || '25000',
+    SAVE_INTERVAL: input.saveInterval || TRAINING_COMMAND_DEFAULTS.saveInterval,
+    KEEP_PERIOD: input.keepPeriod || TRAINING_COMMAND_DEFAULTS.keepPeriod,
     TARGET_HOST: input.targetHost || 'robot@192.168.61.228',
     TARGET_MODEL_DIR: input.targetModelDir || '/data03/data/models/openpi_downloads',
   };
@@ -889,10 +962,10 @@ function currentManualValues() {
   const packages = (transfer.local_entries || []).filter(item => item.is_package);
   const firstPackage = packages[0] || (transfer.packages || [])[0] || {};
   const defaultTaskName = (appState.tasks || [])[0]?.name || packageTaskName(firstPackage.name || '');
-  const taskName = $('#manualTaskName')?.value || defaultTaskName || 'h2_switch_close_to_remote';
+  const taskName = $('#manualTaskName')?.value || defaultTaskName || DEFAULT_TRAINING_TASK_NAME;
   const matchedPackage = packages.find(item => packageTaskName(item.name || '') === taskName)
     || (transfer.packages || []).find(item => packageTaskName(item.name || '') === taskName);
-  const derived = manualDerivedValues(taskName, {dataPackage: matchedPackage?.name || firstPackage.name || '', numTrainSteps: $('#manualNumTrainSteps')?.value || '50000'});
+  const derived = manualDerivedValues(taskName, {dataPackage: matchedPackage?.name || firstPackage.name || '', numTrainSteps: $('#manualNumTrainSteps')?.value || TRAINING_COMMAND_DEFAULTS.numTrainSteps});
   const ossRoot = transfer.oss_root || 'oss://bwton-idc/openpi';
   return {
     taskName,
@@ -901,12 +974,12 @@ function currentManualValues() {
     modelFile: $('#manualModelFile')?.value || '',
     ossRoot: $('#manualOssRoot')?.value || ossRoot,
     repoId: $('#manualRepoId')?.value || derived.repoId,
-    configName: $('#manualConfigName')?.value || 'pi05_h2_lerobot',
-    actionDim: $('#manualActionDim')?.value || '32',
-    realActionDim: $('#manualRealActionDim')?.value || '16',
-    actionHorizon: $('#manualActionHorizon')?.value || '16',
+    configName: $('#manualConfigName')?.value || TRAINING_COMMAND_DEFAULTS.configName,
+    actionDim: $('#manualActionDim')?.value || TRAINING_COMMAND_DEFAULTS.actionDim,
+    realActionDim: $('#manualRealActionDim')?.value || TRAINING_COMMAND_DEFAULTS.realActionDim,
+    actionHorizon: $('#manualActionHorizon')?.value || TRAINING_COMMAND_DEFAULTS.actionHorizon,
     expName: $('#manualExpName')?.value || derived.expName,
-    numTrainSteps: $('#manualNumTrainSteps')?.value || '50000',
+    numTrainSteps: $('#manualNumTrainSteps')?.value || TRAINING_COMMAND_DEFAULTS.numTrainSteps,
     modelTrainDir: $('#manualModelTrainDir')?.value || '',
     packageTimestamp: $('#manualPackageTimestamp')?.value || currentTimestampText(),
   };
@@ -1196,7 +1269,7 @@ function renderDataPreviewEpisode() {
         <div class="data-preview-nav">
           <button class="plain" data-action="episode-frame-prev" ${framePage.page <= 1 ? 'disabled' : ''}>上一页</button>
           <strong>第 ${escapeHtml(framePage.page)} / ${escapeHtml(framePage.total_pages)} 页，共 ${escapeHtml(framePage.total)} 帧</strong>
-          <label class="frame-jump">跳到 <input id="episodeFrameJumpInput" type="number" min="1" max="${escapeHtml(framePage.total)}" value="${escapeHtml(firstFrame || 1)}"> 帧 <button class="plain" data-action="episode-frame-jump">跳转</button></label>
+          <label class="frame-jump page-jump">跳至 <input id="episodeFramePageJumpInput" type="number" min="1" max="${escapeHtml(framePage.total_pages)}" value="${escapeHtml(framePage.page || 1)}"> 页</label>
           <button class="plain" data-action="episode-frame-next" ${framePage.page >= framePage.total_pages ? 'disabled' : ''}>下一页</button>
         </div>
         <div class="episode-frame-list">${frameRows || '<div class="data-preview-empty">当前 episode 暂无帧数据</div>'}</div>
@@ -1422,6 +1495,13 @@ function renderPostprocessJobs() {
 }
 function renderRuntime() {
   const process = appState.process || {}, teleop = appState.teleop || {};
+  if (runtimePending && runtimePendingResolved(process, teleop)) {
+    showNotice(`${runtimePending.message.replace('...', '')}已生效`, 'success');
+    clearRuntimePending();
+  } else if (runtimePending && runtimePendingTimedOut()) {
+    showNotice(`${runtimePending.message} 暂未生效，请查看运行日志或设备状态`);
+    clearRuntimePending();
+  }
   ensureRuntimeCopyButtons();
   const current = process.task;
   $('#currentRuntime').textContent = process.running && current ? `运行中：${current.name} · PID ${process.pid}` : '当前无运行任务';
@@ -1441,7 +1521,7 @@ function renderRuntime() {
   setControlCompactMode(true);
   $('#controlTitle').textContent = `数采控制 · ${current.name}`;
   $('#controlSubtitle').textContent = `${current.device_name} · ${current.description}`;
-  $('#processStatus').textContent = !process.running ? `已退出 (${process.exit_code ?? '—'})` : (teleop.RECORD_RUNNING ? '正在录制' : teleop.START ? '遥操运行中' : teleop.online ? '等待开始遥操' : '初始化中');
+  $('#processStatus').textContent = runtimePending?.message || (!process.running ? `已退出 (${process.exit_code ?? '—'})` : (teleop.RECORD_RUNNING ? '正在录制' : teleop.START ? '遥操运行中' : teleop.online ? '等待开始遥操' : '初始化中'));
   $('#episodeProgress').textContent = `${latest.existing_episodes ?? 0} / ${latest.target_episodes ?? 0}`;
   $('#pidText').textContent = process.pid || '—'; $('#commandText').textContent = process.command || '—';
   if ($('#controlModal')?.classList.contains('open')) {
@@ -1449,23 +1529,29 @@ function renderRuntime() {
   }
   renderCameraPreview();
   const ready = process.running && teleop.online;
-  $('#startControl').disabled = !ready || Boolean(teleop.START);
+  $('#startControl').disabled = Boolean(runtimePending) || !ready || Boolean(teleop.START);
+  $('#startControl').textContent = runtimePending?.type === 'teleop_start' ? '开始遥操指令已发送...' : '开始遥操';
   const canStartRecording = ready && teleop.START && teleop.READY;
   const canStopRecording = process.running && Boolean(teleop.RECORD_RUNNING);
-  $('#recordControl').disabled = !(canStartRecording || canStopRecording);
+  $('#recordControl').disabled = Boolean(runtimePending) || !(canStartRecording || canStopRecording);
   const completedEpisodes = Number(latest.existing_episodes) || 0;
   const lastEpisode = episodeNumber(latest.last_episode);
   const nextEpisode = episodeNumber(latest.next_episode) || completedEpisodes + 1;
   const recordingEpisode = Math.max(lastEpisode, completedEpisodes + 1);
   const savingEpisode = lastEpisode > completedEpisodes ? lastEpisode : completedEpisodes + 1;
-  if (teleop.RECORD_RUNNING) {
+  if (runtimePending?.type === 'record_start') {
+    $('#recordControl').textContent = '录制指令已发送...';
+  } else if (runtimePending?.type === 'record_stop') {
+    $('#recordControl').textContent = '结束录制并保存中...';
+  } else if (teleop.RECORD_RUNNING) {
     $('#recordControl').textContent = `结束并保存第 ${recordingEpisode} 条`;
   } else if (process.running && teleop.START && !teleop.READY && lastEpisode > completedEpisodes) {
     $('#recordControl').textContent = `正在保存第 ${savingEpisode} 条...`;
   } else {
     $('#recordControl').textContent = `开始录制第 ${nextEpisode} 条`;
   }
-  $('#stopControl').disabled = !ready;
+  $('#stopControl').disabled = Boolean(runtimePending) || !ready;
+  $('#stopControl').textContent = runtimePending?.type === 'process_stop' ? '结束采集指令已发送...' : '结束遥操';
 }
 function applyState(state) {
   appState = state;
@@ -1952,6 +2038,25 @@ $('#nextDataListPage')?.addEventListener('click', () => {
   dataListState.page = Math.min(totalPages, (dataListState.page || 1) + 1);
   loadDataList({silent:false});
 });
+function jumpDataListPage(input) {
+  const totalPages = Math.max(1, Math.ceil((dataListState.total || 0) / (dataListState.pageSize || 50)));
+  const nextPage = clampPage(input?.value, totalPages);
+  if (input) input.value = String(nextPage);
+  if (nextPage === dataListState.page) return;
+  dataListState.page = nextPage;
+  loadDataList({silent:false});
+}
+$('#dataListPageJump')?.addEventListener('keydown', event => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  clearTimeout(pageJumpTimers.dataList);
+  jumpDataListPage(event.currentTarget);
+});
+$('#dataListPageJump')?.addEventListener('input', event => {
+  debouncePageJump('dataList', () => jumpDataListPage(event.currentTarget));
+});
+$('#dataListPageJump')?.addEventListener('change', event => jumpDataListPage(event.currentTarget));
+$('#dataListPageJump')?.addEventListener('blur', event => jumpDataListPage(event.currentTarget));
 document.addEventListener('change', event => {
   if (event.target?.id === 'ossTaskNameInput') {
     const taskName = cleanTaskName(event.target.value);
@@ -1974,9 +2079,57 @@ document.addEventListener('input', event => {
     ossTransferState.taskName = cleanTaskName(event.target.value);
   }
 });
+async function jumpEpisodeFramePage(input) {
+  const framePage = dataPreviewState.preview?.frame_page || {};
+  const nextPage = clampPage(input?.value, framePage.total_pages || 1);
+  if (input) input.value = String(nextPage);
+  if (!dataPreviewState.taskId || !dataPreviewState.episode || nextPage === framePage.page) return;
+  try {
+    await loadSingleEpisodePreview(dataPreviewState.taskId, dataPreviewState.episode, nextPage);
+  } catch(e) {
+    showNotice(e.message);
+  }
+}
+document.addEventListener('keydown', async event => {
+  if (event.key !== 'Enter' || event.target?.id !== 'episodeFramePageJumpInput') return;
+  event.preventDefault();
+  clearTimeout(pageJumpTimers.episodeFrame);
+  await jumpEpisodeFramePage(event.target);
+});
+document.addEventListener('input', event => {
+  if (event.target?.id === 'episodeFramePageJumpInput') {
+    debouncePageJump('episodeFrame', () => jumpEpisodeFramePage(event.target));
+  }
+});
+document.addEventListener('change', event => {
+  if (event.target?.id === 'episodeFramePageJumpInput') jumpEpisodeFramePage(event.target);
+});
+document.addEventListener('blur', event => {
+  if (event.target?.id === 'episodeFramePageJumpInput') jumpEpisodeFramePage(event.target);
+}, true);
 ['statusFilter','taskSearch'].forEach(id => $(`#${id}`).addEventListener(id==='taskSearch'?'input':'change', () => { taskPage = 1; renderTasks(); }));
 $('#prevTaskPage')?.addEventListener('click', () => { taskPage = Math.max(1, taskPage - 1); renderTasks(); });
 $('#nextTaskPage')?.addEventListener('click', () => { taskPage += 1; renderTasks(); });
+function jumpTaskPage(input) {
+  const status = $('#statusFilter').value;
+  const query = $('#taskSearch').value.trim().toLowerCase();
+  const tasks = appState.tasks.filter(t => (!status || t.status === status) && (!query || t.name.toLowerCase().includes(query) || t.description.includes(query)));
+  const totalPages = Math.max(1, Math.ceil(tasks.length / TASK_PAGE_SIZE));
+  taskPage = clampPage(input?.value, totalPages);
+  if (input) input.value = String(taskPage);
+  renderTasks();
+}
+$('#taskPageJump')?.addEventListener('keydown', event => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  clearTimeout(pageJumpTimers.task);
+  jumpTaskPage(event.currentTarget);
+});
+$('#taskPageJump')?.addEventListener('input', event => {
+  debouncePageJump('task', () => jumpTaskPage(event.currentTarget));
+});
+$('#taskPageJump')?.addEventListener('change', event => jumpTaskPage(event.currentTarget));
+$('#taskPageJump')?.addEventListener('blur', event => jumpTaskPage(event.currentTarget));
 
 $('#deviceForm').addEventListener('submit', async event => {
   event.preventDefault(); const f=new FormData(event.currentTarget);
@@ -2275,10 +2428,8 @@ document.addEventListener('click', async event => {
   }
   if(action==='episode-frame-jump'){
     const framePage = dataPreviewState.preview?.frame_page || {};
-    const input = $('#episodeFrameJumpInput');
-    const frameNumber = Math.min(Math.max(1, Number(input?.value || 1)), framePage.total || 1);
-    const pageSize = framePage.page_size || 3;
-    const nextPage = Math.min(framePage.total_pages || 1, Math.max(1, Math.ceil(frameNumber / pageSize)));
+    const input = $('#episodeFramePageJumpInput');
+    const nextPage = clampPage(input?.value, framePage.total_pages || 1);
     if (!dataPreviewState.taskId || !dataPreviewState.episode) return;
     button.disabled = true;
     try {
@@ -2545,7 +2696,21 @@ document.addEventListener('click', async event => {
   }
   if(action==='start-task'){
     if(task.active){activeTaskId=task.id;renderRuntime();openModal('controlModal');return;}
-    try{applyState(await api('/api/start',{task_id:task.id}));activeTaskId=task.id;openModal('controlModal');showNotice('遥操进程正在初始化','success');}catch(e){showNotice(e.message);}
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = '启动采集中...';
+    activeTaskId = task.id;
+    showTask(task);
+    setRuntimePending('process_start', '采集进程启动中...', {taskId: task.id, timeoutMs: 20000});
+    try{
+      applyState(await api('/api/start',{task_id:task.id}));
+      openModal('controlModal');
+    }catch(e){
+      clearRuntimePending();
+      button.disabled = false;
+      button.textContent = originalText;
+      showNotice(e.message);
+    }
   }
   if(action==='archive-task'){
     const originalText=button.textContent;
@@ -2562,7 +2727,32 @@ document.addEventListener('click', async event => {
     }
   }
 });
-async function control(action){try{applyState(await api('/api/control',{action}));}catch(e){showNotice(e.message);}}
+async function control(action){
+  const process = appState.process || {};
+  const teleop = appState.teleop || {};
+  const taskId = process.task?.id ?? activeTaskId;
+  const pendingByAction = {
+    start: ['teleop_start', '开始遥操指令已发送...'],
+    stop: ['process_stop', '结束采集指令已发送，等待进程退出...'],
+  };
+  let pending = pendingByAction[action];
+  if (action === 'record') {
+    pending = teleop.RECORD_RUNNING
+      ? ['record_stop', '结束录制指令已发送，正在保存...']
+      : ['record_start', '开始录制指令已发送...'];
+  }
+  if (pending) {
+    setRuntimePending(pending[0], pending[1], {taskId, timeoutMs: action === 'stop' ? 20000 : 12000});
+    renderRuntime();
+  }
+  try{
+    applyState(await api('/api/control',{action}));
+  }catch(e){
+    clearRuntimePending();
+    renderRuntime();
+    showNotice(e.message);
+  }
+}
 $('#startControl').addEventListener('click',()=>control('start')); $('#recordControl').addEventListener('click',()=>control('record')); $('#stopControl').addEventListener('click',()=>control('stop'));
 
 refresh(false); setInterval(()=>refresh(true, {auto:true}),5000);

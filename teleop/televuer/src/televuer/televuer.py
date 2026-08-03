@@ -100,6 +100,8 @@ class TeleVuer:
         self.zmq = zmq
         self.webrtc = webrtc
         self.webrtc_url = webrtc_url
+        self._controller_move_event_count = 0
+        self._controller_move_error_log_time = 0.0
         self._hand_move_event_count = 0
         self._hand_move_error_log_time = 0.0
 
@@ -232,14 +234,22 @@ class TeleVuer:
     async def on_controller_move(self, event, session, fps=60):
         """https://docs.vuer.ai/en/latest/examples/20_motion_controllers.html"""
         try:
+            self._controller_move_event_count += 1
+            value = getattr(event, "value", {})
+            if self._controller_move_event_count == 1:
+                print(
+                    "[TeleVuer] first CONTROLLER_MOVE event received: "
+                    f"keys={list(value.keys()) if isinstance(value, dict) else type(value)}",
+                    flush=True,
+                )
             # ControllerData
             with self.left_arm_pose_shared.get_lock():
-                self.left_arm_pose_shared[:] = event.value["left"]
+                self.left_arm_pose_shared[:] = value["left"]
             with self.right_arm_pose_shared.get_lock():
-                self.right_arm_pose_shared[:] = event.value["right"]
+                self.right_arm_pose_shared[:] = value["right"]
             # ControllerState
-            left_controller = event.value["leftState"]
-            right_controller = event.value["rightState"]
+            left_controller = value["leftState"]
+            right_controller = value["rightState"]
 
             def extract_controllers(controllerState, prefix):
                 # trigger
@@ -267,8 +277,18 @@ class TeleVuer:
             extract_controllers(right_controller, "right")
             with self.motion_data_ready_shared.get_lock():
                 self.motion_data_ready_shared.value = True
-        except:
-            pass
+        except Exception as exc:
+            now = time.monotonic()
+            if now - self._controller_move_error_log_time >= 1.0:
+                self._controller_move_error_log_time = now
+                value = getattr(event, "value", None)
+                keys = list(value.keys()) if isinstance(value, dict) else type(value)
+                print(
+                    "[TeleVuer] CONTROLLER_MOVE handler failed: "
+                    f"{type(exc).__name__}: {exc}; keys={keys}",
+                    flush=True,
+                )
+            return
 
     async def on_hand_move(self, event, session, fps=60):
         """https://docs.vuer.ai/en/latest/examples/19_hand_tracking.html"""

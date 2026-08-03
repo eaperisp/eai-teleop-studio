@@ -17,6 +17,27 @@ head_camera:
   video_id: 22
   serial_number: CP0BB53000FS
   physical_path: /sys/devices/pci0000:00/0000:00:14.0/usb3/3-4/3-4:1.4
+head_depth_camera:
+  enable_zmq: false
+  zmq_port: 55559
+  enable_webrtc: false
+  webrtc_port: null
+  type: opencv_depth
+  data_format: depth_z16
+  fourcc: 'Z16 '
+  ffmpeg_input_format: gray16le
+  depth_dtype: uint16
+  direct_video_id: true
+  usb_interface: '1.0'
+  video_index: 0
+  image_shape:
+  - 480
+  - 640
+  binocular: false
+  fps: 30
+  video_id: null
+  serial_number: CP0BB53000FS
+  physical_path: null
 torso_camera:
   enable_zmq: true
   zmq_port: 55556

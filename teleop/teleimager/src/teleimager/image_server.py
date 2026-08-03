@@ -1149,6 +1149,170 @@ class OpenCVCamera(BaseCamera):
             self.cap = None
         logger_mp.info(f"[OpenCVCamera] Released {self._cam_topic}")
 
+class OpenCVDepthCamera(BaseCamera):
+    def __init__(self, cam_topic, video_path, img_shape, fps,
+                 enable_zmq=True, zmq_port=55559, fourcc="Z16 ", depth_dtype="uint16"):
+        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, False, None, None)
+        self._video_path = video_path
+        self._fourcc = fourcc
+        self._depth_dtype = np.dtype(depth_dtype)
+        if len(self._fourcc) != 4:
+            raise ValueError(f"[OpenCVDepthCamera] FOURCC must contain 4 characters, got {fourcc!r}")
+
+        self.cap = cv2.VideoCapture(self._video_path, cv2.CAP_V4L2)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self._fourcc))
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._img_shape[0])
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._img_shape[1])
+        self.cap.set(cv2.CAP_PROP_FPS, self._fps)
+        self.cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+
+        if not self._can_read_frame():
+            self.release()
+            raise RuntimeError(f"[OpenCVDepthCamera] Camera {self._cam_topic} failed to initialize or read frames.")
+        logger_mp.info(str(self))
+
+    def __str__(self):
+        return (
+            f"[OpenCVDepthCamera: {self._cam_topic}] initialized with "
+            f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS, FOURCC={self._fourcc!r}, dtype={self._depth_dtype}.\n"
+            f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
+            "WebRTC: disabled"
+        )
+
+    def _can_read_frame(self):
+        success, _ = self.cap.read()
+        return success
+
+    def _normalize_depth_frame(self, frame):
+        depth = np.asarray(frame)
+        if depth.ndim == 3:
+            depth = depth[:, :, 0]
+        if depth.dtype != self._depth_dtype:
+            depth = depth.astype(self._depth_dtype, copy=False)
+        expected_size = int(self._img_shape[0]) * int(self._img_shape[1])
+        if depth.size != expected_size:
+            raise RuntimeError(
+                f"[OpenCVDepthCamera] Unexpected depth frame shape {depth.shape}; "
+                f"expected {self._img_shape}"
+            )
+        return np.ascontiguousarray(depth.reshape(self._img_shape))
+
+    def _update_frame(self):
+        if self.cap is not None:
+            ret, frame = self.cap.read()
+            if ret:
+                depth = self._normalize_depth_frame(frame)
+                if self._enable_zmq:
+                    self._zmq_buffer.write(depth.tobytes())
+
+                if not self._ready.is_set():
+                    self._ready.set()
+            else:
+                raise RuntimeError
+
+    def release(self):
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+        logger_mp.info(f"[OpenCVDepthCamera] Released {self._cam_topic}")
+
+class FFmpegDepthCamera(BaseCamera):
+    def __init__(self, cam_topic, video_path, img_shape, fps,
+                 enable_zmq=True, zmq_port=55559, input_format="gray16le", depth_dtype="uint16"):
+        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, False, None, None)
+        self._video_path = video_path
+        self._input_format = input_format
+        self._depth_dtype = np.dtype(depth_dtype)
+        self._frame_size = int(self._img_shape[0]) * int(self._img_shape[1]) * self._depth_dtype.itemsize
+        self._process = None
+        self._pending_frame = None
+        self._start_process()
+        self._pending_frame = self._read_frame_bytes()
+        if self._pending_frame is None:
+            self.release()
+            raise RuntimeError(f"[FFmpegDepthCamera] Camera {self._cam_topic} failed to initialize or read frames.")
+        logger_mp.info(str(self))
+
+    def __str__(self):
+        return (
+            f"[FFmpegDepthCamera: {self._cam_topic}] initialized with "
+            f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS, input_format={self._input_format}, dtype={self._depth_dtype}.\n"
+            f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
+            "WebRTC: disabled"
+        )
+
+    def _start_process(self):
+        self._stop_process()
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "v4l2",
+            "-input_format",
+            self._input_format,
+            "-video_size",
+            f"{self._img_shape[1]}x{self._img_shape[0]}",
+            "-framerate",
+            str(self._fps),
+            "-i",
+            self._video_path,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            self._input_format,
+            "-",
+        ]
+        self._process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=self._frame_size * 2,
+        )
+
+    def _stop_process(self):
+        if self._process is None:
+            return
+        try:
+            self._process.terminate()
+            self._process.wait(timeout=1.0)
+        except Exception:
+            try:
+                self._process.kill()
+            except Exception:
+                pass
+        self._process = None
+
+    def _read_frame_bytes(self):
+        if self._process is None or self._process.stdout is None:
+            return None
+        data = self._process.stdout.read(self._frame_size)
+        if len(data) != self._frame_size:
+            return None
+        return data
+
+    def _update_frame(self):
+        frame_bytes = self._pending_frame
+        self._pending_frame = None
+        if frame_bytes is None:
+            frame_bytes = self._read_frame_bytes()
+        if frame_bytes is None:
+            self._start_process()
+            frame_bytes = self._read_frame_bytes()
+        if frame_bytes is None:
+            raise RuntimeError
+
+        if self._enable_zmq:
+            self._zmq_buffer.write(frame_bytes)
+
+        if not self._ready.is_set():
+            self._ready.set()
+
+    def release(self):
+        self._stop_process()
+        logger_mp.info(f"[FFmpegDepthCamera] Released {self._cam_topic}")
+
 class IsaacSimCamera(BaseCamera):
     def __init__(self, cam_topic, img_shape, fps,
                  enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None,
@@ -1390,6 +1554,82 @@ class ImageServer:
                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec, fourcc)
                         
 
+                elif cam_type == "opencv_depth":
+                    if enable_webrtc:
+                        logger_mp.warning(f"[Image Server] WebRTC is not supported for depth stream {cam_topic}; disabling it.")
+                    if direct_video_id:
+                        video_path = self._resolve_direct_video_path(cam_cfg)
+                        if video_path is None:
+                            self._cameras[cam_topic] = None
+                            logger_mp.warning(f"[Image Server] Depth camera {cam_topic} is offline; waiting for hot-plug.")
+                        else:
+                            try:
+                                self._cameras[cam_topic] = FFmpegDepthCamera(
+                                    cam_topic,
+                                    video_path,
+                                    img_shape,
+                                    fps,
+                                    enable_zmq,
+                                    zmq_port,
+                                    cam_cfg.get("ffmpeg_input_format", "gray16le"),
+                                    cam_cfg.get("depth_dtype", "uint16"),
+                                )
+                            except Exception as e:
+                                self._cameras[cam_topic] = None
+                                logger_mp.error(f"[Image Server] Depth camera {cam_topic} failed to open; waiting for hot-plug: {e}")
+                        continue
+
+                    if physical_path is not None:
+                        vpath = self._cam_finder.get_vpath_by_ppath(physical_path)
+                        if vpath is None:
+                            self._cameras[cam_topic] = None
+                            logger_mp.error(f"[Image Server] Cannot find OpenCVDepthCamera for {cam_topic} with physical path {physical_path}")
+                        else:
+                            self._cameras[cam_topic] = FFmpegDepthCamera(
+                                cam_topic,
+                                vpath,
+                                img_shape,
+                                fps,
+                                enable_zmq,
+                                zmq_port,
+                                cam_cfg.get("ffmpeg_input_format", "gray16le"),
+                                cam_cfg.get("depth_dtype", "uint16"),
+                            )
+                            continue
+
+                    if serial_number is not None:
+                        vpath = self._cam_finder.get_vpath_by_sn(serial_number)
+                        if vpath is None:
+                            self._cameras[cam_topic] = None
+                            logger_mp.error(f"[Image Server] Cannot find OpenCVDepthCamera for {cam_topic} with serial number {serial_number}")
+                        else:
+                            self._cameras[cam_topic] = FFmpegDepthCamera(
+                                cam_topic,
+                                vpath,
+                                img_shape,
+                                fps,
+                                enable_zmq,
+                                zmq_port,
+                                cam_cfg.get("ffmpeg_input_format", "gray16le"),
+                                cam_cfg.get("depth_dtype", "uint16"),
+                            )
+                        continue
+
+                    if not self._cam_finder.is_vpath_exist(video_path):
+                        self._cameras[cam_topic] = None
+                        logger_mp.error(f"[Image Server] Cannot find OpenCVDepthCamera for {cam_topic} with video_id {video_id}")
+                    else:
+                        self._cameras[cam_topic] = FFmpegDepthCamera(
+                            cam_topic,
+                            video_path,
+                            img_shape,
+                            fps,
+                            enable_zmq,
+                            zmq_port,
+                            cam_cfg.get("ffmpeg_input_format", "gray16le"),
+                            cam_cfg.get("depth_dtype", "uint16"),
+                        )
+
                 elif cam_type == "realsense":
                     if not self._realsense_enable:
                         self._cameras[cam_topic] = None
@@ -1399,7 +1639,8 @@ class ImageServer:
                         logger_mp.error(f"[Image Server] Cannot find RealSenseCamera for {cam_topic}")
                     else:
                         self._cameras[cam_topic] = RealSenseCamera(cam_topic, serial_number, img_shape, fps,
-                                                                   enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                                                                   enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                                                                   cam_cfg.get("enable_depth", False))
 
                 elif cam_type == "uvc":
                     uid = None
@@ -1621,6 +1862,17 @@ class ImageServer:
         if video_path is None:
             return None
         try:
+            if cam_cfg.get("type", "uvc").lower() == "opencv_depth":
+                return FFmpegDepthCamera(
+                    cam_topic,
+                    video_path,
+                    cam_cfg.get("image_shape"),
+                    cam_cfg.get("fps", 30),
+                    cam_cfg.get("enable_zmq", False),
+                    cam_cfg.get("zmq_port"),
+                    cam_cfg.get("ffmpeg_input_format", "gray16le"),
+                    cam_cfg.get("depth_dtype", "uint16"),
+                )
             return OpenCVCamera(
                 cam_topic,
                 video_path,
@@ -1647,7 +1899,7 @@ class ImageServer:
                     continue
                 if not (cam_cfg.get("enable_zmq", False) or cam_cfg.get("enable_webrtc", False)):
                     continue
-                if cam_cfg.get("type", "uvc").lower() != "opencv" or not cam_cfg.get("direct_video_id", False):
+                if cam_cfg.get("type", "uvc").lower() not in {"opencv", "opencv_depth"} or not cam_cfg.get("direct_video_id", False):
                     continue
                 with self._camera_state_lock:
                     if self._cameras.get(cam_topic) is not None:

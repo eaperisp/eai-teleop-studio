@@ -27,6 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_BIN = "/home/robot/miniconda3/envs/teleop/bin/python3"
 SUPPORTED_CLOSE_TO_REMOTE = "Change the switch from close to remote"
 SUPPORTED_REMOTE_TO_CLOSE = "Change the switch from remote to close"
+SUPPORTED_LANGUAGES = [SUPPORTED_CLOSE_TO_REMOTE, SUPPORTED_REMOTE_TO_CLOSE]
 APP_LOG_ROOT = PROJECT_ROOT / "logs" / "app"
 TASK_LOG_ROOT = PROJECT_ROOT / "logs" / "tasks" / "h2_switch_flip_api"
 MAX_TASK_LOG_DIRS = 20
@@ -412,7 +413,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         language = str(payload.get("language", "")).strip()
-        retries_raw = payload.get("retries", 1)
+        retries_raw = payload.get("retries", 3)
         try:
             retries = int(retries_raw)
         except Exception:
@@ -425,11 +426,25 @@ class Handler(BaseHTTPRequestHandler):
         if language == SUPPORTED_REMOTE_TO_CLOSE:
             self._send_json(
                 HTTPStatus.UNPROCESSABLE_ENTITY,
-                {"ok": False, "code": 1, "code_name": "NOT_IMPLEMENTED", "error": "remote to close is not implemented"},
+                {
+                    "ok": False,
+                    "code": 1,
+                    "code_name": "NOT_IMPLEMENTED",
+                    "message": "remote to close is not implemented",
+                    "error": "remote to close is not implemented",
+                    "supported": SUPPORTED_LANGUAGES,
+                },
             )
             return
         if language != SUPPORTED_CLOSE_TO_REMOTE:
-            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"ok": False, "error": "unsupported language"})
+            self._send_json(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                {
+                    "ok": False,
+                    "error": f"unsupported language: {language!r}",
+                    "supported": SUPPORTED_LANGUAGES,
+                },
+            )
             return
 
         with STATE_LOCK:

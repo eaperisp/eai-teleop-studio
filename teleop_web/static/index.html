@@ -89,6 +89,7 @@
       <div class="pagination" id="taskPagination">
         <button id="prevTaskPage" class="plain" type="button">上一页</button>
         <span id="taskPageInfo">第 1 / 1 页</span>
+        <label class="page-jump">跳至 <input id="taskPageJump" type="number" min="1" value="1"> 页</label>
         <button id="nextTaskPage" class="plain" type="button">下一页</button>
       </div>
     </section>
@@ -111,6 +112,7 @@
       <div class="pagination" id="dataListPagination">
         <button id="prevDataListPage" class="plain" type="button">上一页</button>
         <span id="dataListPageInfo">第 1 / 1 页</span>
+        <label class="page-jump">跳至 <input id="dataListPageJump" type="number" min="1" value="1"> 页</label>
         <button id="nextDataListPage" class="plain" type="button">下一页</button>
       </div>
     </section>
@@ -266,6 +268,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=20260730-oss-task-dir" defer></script>
+  <script src="/app.js?v=20260803-page-jump-input" defer></script>
 </body>
 </html>
