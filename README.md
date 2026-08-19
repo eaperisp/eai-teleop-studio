@@ -1,4 +1,4 @@
-# eai-teleop-studio 部署与运维
+# eai-teleop-studio 部署
 
 本项目用于 H2 数据采集、相机预览、数据转换、OSS 传输、训练命令生成、数据同步和拨闸 API 服务。推荐部署用户为 `robot`。
 
@@ -6,7 +6,6 @@
 
 ```bash
 /home/robot/eai-teleop-studio
-/data02/app/eai-teleop-studio
 ```
 
 如果部署目录变化，优先通过 `scripts/install_autostart_services.sh` 重新安装 systemd 服务。服务文件中的 `@PROJECT_ROOT@` 会由安装脚本替换为当前项目目录。
@@ -29,12 +28,12 @@ tools/        数据转换、OpenPI、设备辅助工具
 数据目录不放在项目内。当前生产环境常用：
 
 ```text
-/data03/data/datasets/robot               原始采集任务
-/data03/data/datasets/lerobot             LeRobot 数据集
-/data03/data/datasets/lerobot/packages    LeRobot 压缩包
-/data03/data/datasets/openpi              OpenPI 归一化工作目录
-/data03/data/datasets/training            训练数据集与运行态配置
-/data03/data/models/openpi_downloads      模型回传下载目录
+/home/robot/data/datasets/robot               原始采集任务
+/home/robot/data/datasets/lerobot             LeRobot 数据集
+/home/robot/data/datasets/lerobot/packages    LeRobot 压缩包
+/home/robot/data/datasets/openpi              OpenPI 归一化工作目录
+/home/robot/data/datasets/training            训练数据集与运行态配置
+/home/robot/data/models/openpi_downloads      模型回传下载目录
 ```
 
 ## 日志规划
@@ -94,53 +93,6 @@ logs/tasks/h2_switch_flip_api/YYYY-MM-DD/YYYYmmdd_HHMMSS_<task_id>/
   debug_images/
 ```
 
-## 打包部署
-
-在已有 Linux 项目目录中打包，脚本会排除 `.git`、`data`、`logs`、`models`、缓存和依赖目录：
-
-```bash
-cd /home/robot/eai-teleop-studio
-bash scripts/deploy_project.sh
-```
-
-复制到目标机器：
-
-```bash
-bash scripts/deploy_project.sh robot@192.168.61.228:/data02/app
-```
-
-目标机器解压后安装服务：
-
-```bash
-cd /data02/app
-tar -xzf eai-teleop-studio_*.tar.gz
-cd eai-teleop-studio
-sudo bash scripts/install_autostart_services.sh
-```
-
-如果手工同步代码，注意不要把大数据和日志一起同步：
-
-```bash
-rsync -avh --delete \
-  --exclude='.git' \
-  --exclude='data' \
-  --exclude='logs' \
-  --exclude='models' \
-  --exclude='__pycache__' \
-  --exclude='.pytest_cache' \
-  /home/robot/eai-teleop-studio/ \
-  robot@192.168.61.228:/data02/app/eai-teleop-studio/
-```
-
-权限修复：
-
-```bash
-cd /data02/app/eai-teleop-studio
-find . -type d -exec chmod 775 {} +
-find . -type f -exec chmod 664 {} +
-chmod +x scripts/*.sh scripts/robot_sync/*.sh
-```
-
 ## 系统准备
 
 ```bash
@@ -148,6 +100,12 @@ sudo apt update
 sudo apt install -y \
   git curl wget rsync build-essential python3-dev \
   ffmpeg libusb-1.0-0-dev libturbojpeg0-dev v4l-utils openssl
+```
+
+## 克隆项目
+```bash
+cd /home/robot
+git clone https://github.com/eaperisp/eai-teleop-studio eai-teleop-studio
 ```
 
 Miniconda：
