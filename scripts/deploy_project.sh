@@ -34,6 +34,7 @@ tar \
   --exclude="${PROJECT_NAME}/.mypy_cache" \
   --exclude="${PROJECT_NAME}/.ruff_cache" \
   --exclude="${PROJECT_NAME}/node_modules" \
+  --exclude="${PROJECT_NAME}/hand_web/node_modules" \
   --exclude="${PROJECT_NAME}/teleop_web/static/__pycache__" \
   -czf "${ARCHIVE}" \
   "${PROJECT_NAME}"

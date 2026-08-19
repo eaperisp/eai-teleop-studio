@@ -1,11 +1,13 @@
-from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber # dds
-from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorCmds_, MotorStates_                           # idl
-from unitree_sdk2py.idl.default import unitree_go_msg_dds__MotorCmd_
-
 from teleop.robot_control.hand_retargeting import HandRetargeting, HandType
+from teleop.robot_control.devices.brainco import BraincoHandSDK
+from teleop.robot_control.devices.brainco.dds_transport import (
+    LEFT_COMMAND_TOPIC,
+    LEFT_STATE_TOPIC,
+    RIGHT_COMMAND_TOPIC,
+    RIGHT_STATE_TOPIC,
+)
 import numpy as np
 from enum import IntEnum
-import threading
 import time
 from multiprocessing import Process, Array
 
@@ -13,10 +15,24 @@ import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
 
 brainco_Num_Motors = 6
-kTopicbraincoLeftCommand = "rt/brainco/left/cmd"
-kTopicbraincoLeftState = "rt/brainco/left/state"
-kTopicbraincoRightCommand = "rt/brainco/right/cmd"
-kTopicbraincoRightState = "rt/brainco/right/state"
+kTopicbraincoLeftCommand = LEFT_COMMAND_TOPIC
+kTopicbraincoLeftState = LEFT_STATE_TOPIC
+kTopicbraincoRightCommand = RIGHT_COMMAND_TOPIC
+kTopicbraincoRightState = RIGHT_STATE_TOPIC
+
+
+def _update_shared_hand_states(states, left_hand_state_array, right_hand_state_array):
+    """Copy each available hand independently; one missing hand must not block the other."""
+    for side, shared_array in (
+        ("left", left_hand_state_array),
+        ("right", right_hand_state_array),
+    ):
+        state = states.get(side)
+        if state is None:
+            continue
+        with shared_array.get_lock():
+            shared_array[:] = state.positions
+
 
 class Brainco_Controller_ctrl:
     def __init__(self, left_gripper_trigger_in, left_gripper_squeeze_in, right_gripper_trigger_in, right_gripper_squeeze_in, 
@@ -24,7 +40,6 @@ class Brainco_Controller_ctrl:
                        xr_motion_data_ready_in = None):
         logger_mp.info("Initialize Brainco_Controller_ctrl...")
         self.fps = fps
-        self.hand_sub_ready = False
         self.Unit_Test = Unit_Test
         self.simulation_mode = simulation_mode
 
@@ -33,30 +48,9 @@ class Brainco_Controller_ctrl:
         else:
             self.hand_retargeting = HandRetargeting(HandType.BRAINCO_HAND_Unit_Test)
 
-        # initialize handcmd publisher and handstate subscriber
-        self.LeftHandCmb_publisher = ChannelPublisher(kTopicbraincoLeftCommand, MotorCmds_)
-        self.LeftHandCmb_publisher.Init()
-        self.RightHandCmb_publisher = ChannelPublisher(kTopicbraincoRightCommand, MotorCmds_)
-        self.RightHandCmb_publisher.Init()
-
-        self.LeftHandState_subscriber = ChannelSubscriber(kTopicbraincoLeftState, MotorStates_)
-        self.LeftHandState_subscriber.Init()
-        self.RightHandState_subscriber = ChannelSubscriber(kTopicbraincoRightState, MotorStates_)
-        self.RightHandState_subscriber.Init()
-
         # Shared Arrays for hand states
         self.left_hand_state_array  = Array('d', brainco_Num_Motors, lock=True)  
         self.right_hand_state_array = Array('d', brainco_Num_Motors, lock=True)
-
-        # initialize subscribe thread
-        self.subscribe_state_thread = threading.Thread(target=self._subscribe_hand_state)
-        self.subscribe_state_thread.daemon = True
-        self.subscribe_state_thread.start()
-
-        while not self.hand_sub_ready:
-            time.sleep(0.1)
-            logger_mp.warning("[Brainco_Controller_ctrl] Waiting to subscribe dds...")
-        logger_mp.info("[Brainco_Controller_ctrl] Subscribe dds ok.")
 
         hand_control_process = Process(target=self.control_process, args=(left_gripper_trigger_in, left_gripper_squeeze_in, right_gripper_trigger_in, right_gripper_squeeze_in, 
                                                                           self.left_hand_state_array, self.right_hand_state_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array,
@@ -66,32 +60,11 @@ class Brainco_Controller_ctrl:
 
         logger_mp.info("Initialize Brainco_Controller_ctrl OK!\n")
 
-    def _subscribe_hand_state(self):
-        while True:
-            left_hand_msg  = self.LeftHandState_subscriber.Read()
-            right_hand_msg = self.RightHandState_subscriber.Read()
-            if left_hand_msg is not None and right_hand_msg is not None:
-                # Update left hand state
-                for idx, id in enumerate(Brainco_Left_Hand_JointIndex):
-                    self.left_hand_state_array[idx] = left_hand_msg.states[id].q
-                # Update right hand state
-                for idx, id in enumerate(Brainco_Right_Hand_JointIndex):
-                    self.right_hand_state_array[idx] = right_hand_msg.states[id].q
-                self.hand_sub_ready = True
-            time.sleep(0.002)
-
     def ctrl_dual_hand(self, left_q_target, right_q_target):
         """
         Set current left, right hand motor state target q
         """
-        for idx, id in enumerate(Brainco_Left_Hand_JointIndex):             
-            self.left_hand_msg.cmds[id].q = left_q_target[idx]
-        for idx, id in enumerate(Brainco_Right_Hand_JointIndex):             
-            self.right_hand_msg.cmds[id].q = right_q_target[idx] 
-
-        self.LeftHandCmb_publisher.Write(self.left_hand_msg)
-        self.RightHandCmb_publisher.Write(self.right_hand_msg)
-        # logger_mp.debug("hand ctrl publish ok.")
+        self.hand_sdk.command_both(left_q_target, right_q_target)
     
     def control_process(self, left_gripper_trigger_in, left_gripper_squeeze_in, right_gripper_trigger_in, right_gripper_squeeze_in,
                               left_hand_state_array, right_hand_state_array, dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None,
@@ -101,18 +74,13 @@ class Brainco_Controller_ctrl:
         left_q_target  = np.full(brainco_Num_Motors, 0.0, dtype=float)
         right_q_target = np.full(brainco_Num_Motors, 0.0, dtype=float)
 
-        # initialize brainco hand's cmd msg
-        self.left_hand_msg  = MotorCmds_()
-        self.left_hand_msg.cmds = [unitree_go_msg_dds__MotorCmd_() for _ in range(len(Brainco_Left_Hand_JointIndex))]
-        self.right_hand_msg = MotorCmds_()
-        self.right_hand_msg.cmds = [unitree_go_msg_dds__MotorCmd_() for _ in range(len(Brainco_Right_Hand_JointIndex))]
-
-        for idx, id in enumerate(Brainco_Left_Hand_JointIndex):
-            self.left_hand_msg.cmds[id].q = 0.0
-            self.left_hand_msg.cmds[id].dq = 1.0
-        for idx, id in enumerate(Brainco_Right_Hand_JointIndex):
-            self.right_hand_msg.cmds[id].q = 0.0
-            self.right_hand_msg.cmds[id].dq = 1.0
+        self.hand_sdk = BraincoHandSDK(
+            "dds",
+            sides="both",
+            initialize_factory=False,
+            continuous_publish=False,
+        )
+        self.hand_sdk.connect()
 
         try:
             while self.running:
@@ -133,13 +101,15 @@ class Brainco_Controller_ctrl:
                 else:
                     xr_motion_data_ready = True
 
+                states = self.hand_sdk.read_states(timeout=0.0)
+                _update_shared_hand_states(states, left_hand_state_array, right_hand_state_array)
                 state_data = np.concatenate((np.array(left_hand_state_array[:]), np.array(right_hand_state_array[:])))
 
                 if xr_motion_data_ready:
                     # In the official document, the angles are in the range [0, 1] ==> 0.0: fully open  1.0: fully closed
                     left_triger_value = (10.0 - left_trigger_value) / 10.0
-                    left_q_target[0]  = np.clip((left_triger_value - 0.5) / 0.5, 0.0, 0.98) # thumb-aux
-                    left_q_target[1]  = np.clip(left_triger_value / 0.5, 0.0, 0.7) # thumb
+                    left_q_target[0]  = np.clip((left_triger_value - 0.5) / 0.5, 0.0, 0.98) # thumb
+                    left_q_target[1]  = np.clip(left_triger_value / 0.5, 0.0, 0.7) # thumb-aux
                     left_q_target[2]  = np.clip(left_squeeze_value, 0.0, 0.98)                   # index
                     left_q_target[3]  = np.clip(left_triger_value, 0.0, 0.98)   # middle
                     left_q_target[4]  = np.clip(left_triger_value, 0.0, 0.98)   # ring
@@ -166,6 +136,7 @@ class Brainco_Controller_ctrl:
                 sleep_time = max(0, (1 / self.fps) - time_elapsed)
                 time.sleep(sleep_time)
         finally:
+            self.hand_sdk.disconnect()
             logger_mp.info("Brainco_Controller_ctrl has been closed.")
 
 
@@ -174,7 +145,6 @@ class Brainco_Controller_hand:
                        dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False, xr_motion_data_ready_in = None):
         logger_mp.info("Initialize Brainco_Controller_hand...")
         self.fps = fps
-        self.hand_sub_ready = False
         self.Unit_Test = Unit_Test
         self.simulation_mode = simulation_mode
 
@@ -184,30 +154,9 @@ class Brainco_Controller_hand:
             self.hand_retargeting = HandRetargeting(HandType.BRAINCO_HAND_Unit_Test)
 
 
-        # initialize handcmd publisher and handstate subscriber
-        self.LeftHandCmb_publisher = ChannelPublisher(kTopicbraincoLeftCommand, MotorCmds_)
-        self.LeftHandCmb_publisher.Init()
-        self.RightHandCmb_publisher = ChannelPublisher(kTopicbraincoRightCommand, MotorCmds_)
-        self.RightHandCmb_publisher.Init()
-
-        self.LeftHandState_subscriber = ChannelSubscriber(kTopicbraincoLeftState, MotorStates_)
-        self.LeftHandState_subscriber.Init()
-        self.RightHandState_subscriber = ChannelSubscriber(kTopicbraincoRightState, MotorStates_)
-        self.RightHandState_subscriber.Init()
-
         # Shared Arrays for hand states
         self.left_hand_state_array  = Array('d', brainco_Num_Motors, lock=True)  
         self.right_hand_state_array = Array('d', brainco_Num_Motors, lock=True)
-
-        # initialize subscribe thread
-        self.subscribe_state_thread = threading.Thread(target=self._subscribe_hand_state)
-        self.subscribe_state_thread.daemon = True
-        self.subscribe_state_thread.start()
-
-        while not self.hand_sub_ready:
-            time.sleep(0.1)
-            logger_mp.warning("[Brainco_Controller_hand] Waiting to subscribe dds...")
-        logger_mp.info("[Brainco_Controller_hand] Subscribe dds ok.")
 
         hand_control_process = Process(target=self.control_process, args=(left_hand_array, right_hand_array,  self.left_hand_state_array, self.right_hand_state_array,
                                                                           dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, xr_motion_data_ready_in))
@@ -216,32 +165,11 @@ class Brainco_Controller_hand:
 
         logger_mp.info("Initialize Brainco_Controller_hand OK!")
 
-    def _subscribe_hand_state(self):
-        while True:
-            left_hand_msg  = self.LeftHandState_subscriber.Read()
-            right_hand_msg = self.RightHandState_subscriber.Read()
-            if left_hand_msg is not None and right_hand_msg is not None:
-                # Update left hand state
-                for idx, id in enumerate(Brainco_Left_Hand_JointIndex):
-                    self.left_hand_state_array[idx] = left_hand_msg.states[id].q
-                # Update right hand state
-                for idx, id in enumerate(Brainco_Right_Hand_JointIndex):
-                    self.right_hand_state_array[idx] = right_hand_msg.states[id].q
-                self.hand_sub_ready = True
-            time.sleep(0.002)
-
     def ctrl_dual_hand(self, left_q_target, right_q_target):
         """
         Set current left, right hand motor state target q
         """
-        for idx, id in enumerate(Brainco_Left_Hand_JointIndex):             
-            self.left_hand_msg.cmds[id].q = left_q_target[idx]
-        for idx, id in enumerate(Brainco_Right_Hand_JointIndex):             
-            self.right_hand_msg.cmds[id].q = right_q_target[idx] 
-
-        self.LeftHandCmb_publisher.Write(self.left_hand_msg)
-        self.RightHandCmb_publisher.Write(self.right_hand_msg)
-        # logger_mp.debug("hand ctrl publish ok.")
+        self.hand_sdk.command_both(left_q_target, right_q_target)
     
     def control_process(self, left_hand_array, right_hand_array, left_hand_state_array, right_hand_state_array,
                               dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None, xr_motion_data_ready_in = None):
@@ -250,18 +178,13 @@ class Brainco_Controller_hand:
         left_q_target  = np.full(brainco_Num_Motors, 0.0, dtype=float)
         right_q_target = np.full(brainco_Num_Motors, 0.0, dtype=float)
 
-        # initialize brainco hand's cmd msg
-        self.left_hand_msg  = MotorCmds_()
-        self.left_hand_msg.cmds = [unitree_go_msg_dds__MotorCmd_() for _ in range(len(Brainco_Left_Hand_JointIndex))]
-        self.right_hand_msg = MotorCmds_()
-        self.right_hand_msg.cmds = [unitree_go_msg_dds__MotorCmd_() for _ in range(len(Brainco_Right_Hand_JointIndex))]
-
-        for idx, id in enumerate(Brainco_Left_Hand_JointIndex):
-            self.left_hand_msg.cmds[id].q = 0.0
-            self.left_hand_msg.cmds[id].dq = 1.0
-        for idx, id in enumerate(Brainco_Right_Hand_JointIndex):
-            self.right_hand_msg.cmds[id].q = 0.0
-            self.right_hand_msg.cmds[id].dq = 1.0
+        self.hand_sdk = BraincoHandSDK(
+            "dds",
+            sides="both",
+            initialize_factory=False,
+            continuous_publish=False,
+        )
+        self.hand_sdk.connect()
 
         try:
             while self.running:
@@ -276,6 +199,9 @@ class Brainco_Controller_hand:
                         xr_motion_data_ready = xr_motion_data_ready_in.value
                 else:
                     xr_motion_data_ready = True
+
+                states = self.hand_sdk.read_states(timeout=0.0)
+                _update_shared_hand_states(states, left_hand_state_array, right_hand_state_array)
 
                 # Read left and right q_state from shared arrays
                 state_data = np.concatenate((np.array(left_hand_state_array[:]), np.array(right_hand_state_array[:])))
@@ -292,7 +218,7 @@ class Brainco_Controller_hand:
                     #     - idx 0:   0~1.52
                     #     - idx 1:   0~1.05
                     #     - idx 2~5: 0~1.47
-                    # We normalize them using (max - value) / range
+                    # Normalize the retargeted radians to the Revo2 0.0-1.0 range.
                     def normalize(val, min_val, max_val):
                         return 1.0 - np.clip((max_val - val) / (max_val - min_val), 0.0, 1.0)
 
@@ -320,6 +246,7 @@ class Brainco_Controller_hand:
                 sleep_time = max(0, (1 / self.fps) - time_elapsed)
                 time.sleep(sleep_time)
         finally:
+            self.hand_sdk.disconnect()
             logger_mp.info("Brainco_Controller_hand has been closed.")
 
 # according to the official documentation, https://www.brainco-hz.com/docs/revolimb-hand/product/parameters.html

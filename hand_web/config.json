@@ -1,0 +1,23 @@
+{
+  "web": {
+    "host": "127.0.0.1",
+    "port": 18089
+  },
+  "default_device": "brainco_revo2",
+  "devices": {
+    "brainco_revo2": {
+      "default_transport": "modbus",
+      "modbus": {
+        "port": "",
+        "slave_id": 127,
+        "side": "right"
+      },
+      "dds": {
+        "network_interface": "",
+        "domain": 0,
+        "sides": "both",
+        "publish_hz": 50
+      }
+    }
+  }
+}

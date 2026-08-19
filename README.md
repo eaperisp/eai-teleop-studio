@@ -157,6 +157,7 @@ PY
 
 ```text
 logs/app/xr-teleop-web.service.log
+logs/app/hand-web.service.log
 logs/app/teleimager-camera-capture.service.log
 logs/app/robot-sync-tool.service.log
 logs/app/robot_sync.log
@@ -177,7 +178,7 @@ logs/app/h2_switch_flip_api_17002.nohup.out
 使用 copytruncate，服务无需重启即可继续写当前日志
 ```
 
-Web 平台业务日志按日期放到 `logs/system/teleop_YYYY-MM-DD.log`。
+Web 平台业务日志按日期放到 `logs/system/teleop_YYYY-MM-DD.log`，灵巧手调试操作日志放到 `logs/system/hand_web_YYYY-MM-DD.log`。两者使用相同的日志格式。
 
 数据转换、归一化、OSS 上传/下载等任务日志按任务名和日期分目录：
 
@@ -406,10 +407,11 @@ tail -f /home/robot/eai-teleop-studio/logs/system/teleop_$(date +%F).log
 
 ## 开机自启服务
 
-项目提供 4 个 systemd 服务：
+项目提供 5 个 systemd 服务：
 
 ```text
 xr-teleop-web.service                 Web 数据采集平台，端口 18099
+hand-web.service                      灵巧手调试工具，端口 18089
 teleimager-camera-capture.service     相机 WebRTC/ZMQ 服务
 robot-sync-tool.service               数据同步工具，默认端口 18090
 h2-switch-flip-api.service            H2 拨闸 API，端口 17002
@@ -428,10 +430,17 @@ sudo bash scripts/install_autostart_services.sh
 sudo bash scripts/install_autostart_services.sh xr-teleop-web.service h2-switch-flip-api.service
 ```
 
+只安装灵巧手调试服务：
+
+```bash
+sudo bash scripts/install_autostart_services.sh hand-web.service
+```
+
 查看状态：
 
 ```bash
 systemctl is-active xr-teleop-web.service
+systemctl is-active hand-web.service
 systemctl is-active teleimager-camera-capture.service
 systemctl is-active robot-sync-tool.service
 systemctl is-active h2-switch-flip-api.service
@@ -441,6 +450,7 @@ systemctl is-active h2-switch-flip-api.service
 
 ```bash
 sudo systemctl restart xr-teleop-web.service
+sudo systemctl restart hand-web.service
 sudo systemctl restart teleimager-camera-capture.service
 sudo systemctl restart robot-sync-tool.service
 sudo systemctl restart h2-switch-flip-api.service

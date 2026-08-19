@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 SERVICES=(
   "xr-teleop-web.service"
+  "hand-web.service"
   "teleimager-camera-capture.service"
   "robot-sync-tool.service"
   "h2-switch-flip-api.service"

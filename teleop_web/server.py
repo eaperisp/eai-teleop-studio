@@ -39,6 +39,7 @@ from teleop.robot_control.end_effectors import (
     SINGLE_SIDE_ACTIVE_END_EFFECTORS,
     canonical_end_effector,
 )
+from teleop.utils.daily_file_logger import DailyFileLogger
 from teleop_web.training_prep import TrainingPrepError, TrainingPrepManager, training_data_root
 
 try:
@@ -350,36 +351,6 @@ DEFAULT_DEVICE = {
 
 class ValidationError(ValueError):
     pass
-
-
-class DailyFileLogger:
-    """Tiny daily rotating file logger for the dependency-free web console."""
-
-    def __init__(self, log_dir: Path) -> None:
-        self.log_dir = log_dir
-        self._lock = threading.RLock()
-
-    def _path_for_today(self) -> Path:
-        return self.log_dir / "system" / f"teleop_{time.strftime('%Y-%m-%d')}.log"
-
-    def write(self, level: str, message: str, **fields: Any) -> None:
-        with self._lock:
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            extra = ""
-            if fields:
-                try:
-                    extra = " " + json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str)
-                except TypeError:
-                    extra = f" {fields}"
-            line = f"{timestamp} [{level.upper()}] {message}{extra}\n"
-            try:
-                path = self._path_for_today()
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with path.open("a", encoding="utf-8") as log_file:
-                    log_file.write(line)
-            except OSError as exc:
-                print(f"{timestamp} [WARNING] failed to write log file {self._path_for_today()}: {exc}")
-            print(line, end="")
 
 
 def _nonempty_string(value: Any, field: str, max_length: int = 200) -> str:

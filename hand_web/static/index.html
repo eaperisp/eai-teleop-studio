@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>灵巧手调试工具</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="product-title">
+        <span class="product-mark" aria-hidden="true">HC</span>
+        <div>
+          <h1>灵巧手调试工具</h1>
+          <p id="deviceSubtitle">等待设备配置</p>
+        </div>
+      </div>
+      <div class="top-status">
+        <span class="status-dot" id="statusDot" aria-hidden="true"></span>
+        <div>
+          <strong id="statusLabel">未连接</strong>
+          <span id="statusDetail">请选择通信方式</span>
+        </div>
+        <button class="button secondary compact" id="disconnectButton" disabled>断开</button>
+      </div>
+    </header>
+
+    <div class="safety-strip">
+      <strong>控制源互斥</strong>
+      <span>使用本工具时，请关闭官方上位机并停止遥操程序。</span>
+    </div>
+
+    <main class="workspace">
+      <aside class="connection-panel panel">
+        <div class="panel-title">
+          <div><span class="section-index">01</span><h2>设备连接</h2></div>
+        </div>
+
+        <label class="field">
+          <span>设备型号</span>
+          <select id="deviceSelect"></select>
+        </label>
+        <label class="field">
+          <span>通信方式</span>
+          <select id="transportSelect"></select>
+        </label>
+        <p class="transport-description" id="transportDescription"></p>
+        <div id="connectionFields"></div>
+        <button class="button primary full" id="connectButton">连接设备</button>
+
+        <div class="connection-facts" id="connectionFacts">
+          <div><span>设备</span><strong>--</strong></div>
+          <div><span>链路</span><strong>--</strong></div>
+          <div><span>反馈</span><strong>--</strong></div>
+        </div>
+      </aside>
+
+      <section class="control-column">
+        <div class="control-toolbar">
+          <div class="side-tabs" id="sideTabs" role="tablist" aria-label="选择灵巧手"></div>
+          <label class="live-toggle">
+            <input type="checkbox" id="liveToggle">
+            <span aria-hidden="true"></span>
+            实时发送
+          </label>
+        </div>
+
+        <div class="control-grid">
+          <section class="joint-panel panel">
+            <div class="panel-title">
+              <div><span class="section-index">02</span><h2>关节位置</h2></div>
+              <span class="range-caption">0 张开 / 100 闭合</span>
+            </div>
+            <div class="joint-list" id="jointList"></div>
+            <div class="command-bar">
+              <label class="duration-field" id="durationField">
+                <span>动作时长</span>
+                <input type="range" id="durationInput" min="50" max="2000" step="50" value="500">
+                <output id="durationOutput">500 ms</output>
+              </label>
+              <button class="button danger" id="stopButton" disabled>停止</button>
+              <button class="button primary" id="sendButton" disabled>执行姿态</button>
+            </div>
+          </section>
+
+          <aside class="right-column">
+            <section class="pose-panel panel">
+              <div class="panel-title">
+                <div><span class="section-index">03</span><h2>姿态预览</h2></div>
+                <span class="side-name" id="previewSide">右手</span>
+              </div>
+              <div class="hand-stage" id="handStage" aria-label="当前手指位置三维预览">
+                <div class="model-state" id="modelState">模型加载中</div>
+              </div>
+              <div class="quick-actions" id="quickActions"></div>
+            </section>
+
+            <section class="activity-panel panel">
+              <div class="panel-title">
+                <div><span class="section-index">04</span><h2>操作记录</h2></div>
+                <button class="text-button" id="clearLogButton">清空</button>
+              </div>
+              <div class="activity-list" id="activityList"></div>
+            </section>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/hand-preview.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
