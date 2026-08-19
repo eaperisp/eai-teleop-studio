@@ -1,16 +1,27 @@
 # eai-teleop-studio 部署
 
-本项目用于 H2 数据采集、相机预览、数据转换、OSS 传输、训练命令生成、数据同步和拨闸 API 服务。推荐部署用户为 `robot`。
+本项目用于 H2 数据采集、相机预览、数据转换、OSS 传输、训练命令生成、数据同步和拨闸 API 服务。推荐部署用户为 `robot`，默认部署根目录为 `/home/robot`。
 
-常用部署目录：
+## 基础目录
+
+项目目录：
 
 ```bash
 /home/robot/eai-teleop-studio
 ```
 
-如果部署目录变化，优先通过 `scripts/install_autostart_services.sh` 重新安装 systemd 服务。服务文件中的 `@PROJECT_ROOT@` 会由安装脚本替换为当前项目目录。
+数据目录不放在项目内，统一放到 `/home/robot/data`：
 
-## 目录约定
+```text
+/home/robot/data/datasets/robot               原始采集任务
+/home/robot/data/datasets/lerobot             LeRobot 数据集
+/home/robot/data/datasets/lerobot/packages    LeRobot 压缩包
+/home/robot/data/datasets/openpi              OpenPI 归一化工作目录
+/home/robot/data/datasets/training            训练数据集与运行态配置
+/home/robot/data/models/openpi_downloads      模型回传下载目录
+```
+
+项目内目录约定：
 
 ```text
 config/       项目配置、模板、证书、初始姿态
@@ -25,15 +36,119 @@ api/          H2 拨闸 HTTP API
 tools/        数据转换、OpenPI、设备辅助工具
 ```
 
-数据目录不放在项目内。当前生产环境常用：
+如果部署目录变化，优先通过 `scripts/install_autostart_services.sh` 重新安装 systemd 服务。服务文件中的 `@PROJECT_ROOT@` 会由安装脚本替换为当前项目目录。
+
+## 系统依赖
+
+```bash
+sudo apt update
+sudo apt install -y \
+  git curl wget rsync build-essential python3-dev \
+  ffmpeg libusb-1.0-0-dev libturbojpeg0-dev v4l-utils openssl \
+  netcat-openbsd
+```
+
+安装 Miniconda：
+
+```bash
+mkdir -p ~/miniconda3
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
+bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
+rm ~/miniconda3/miniconda.sh
+~/miniconda3/bin/conda init bash
+~/miniconda3/bin/conda config --set auto_activate false
+source ~/.bashrc
+```
+
+## 克隆项目
+
+```bash
+cd /home/robot
+git clone https://github.com/eaperisp/eai-teleop-studio eai-teleop-studio
+```
+
+## Python环境
+
+本部署拆成 3 个运行环境：
 
 ```text
-/home/robot/data/datasets/robot               原始采集任务
-/home/robot/data/datasets/lerobot             LeRobot 数据集
-/home/robot/data/datasets/lerobot/packages    LeRobot 压缩包
-/home/robot/data/datasets/openpi              OpenPI 归一化工作目录
-/home/robot/data/datasets/training            训练数据集与运行态配置
-/home/robot/data/models/openpi_downloads      模型回传下载目录
+teleimager  相机服务环境，负责 RGB/深度相机采集、ZMQ、WebRTC
+teleop      数据采集服务环境，负责 Web 控制台、H2 遥操作、episode 采集、API
+lerobot     数据转换服务环境，负责 H2 原始数据转 LeRobot，以及 OpenPI norm stats
+```
+
+### 相机服务 teleimager
+
+```bash
+conda create -n teleimager python=3.10 numpy=1.26.4 -y --override-channels -c conda-forge
+conda activate teleimager
+
+cd /home/robot/eai-teleop-studio
+pip install -e "teleop/teleimager[server]"
+```
+
+### 数据采集服务 teleop
+
+```bash
+conda create -n teleop python=3.10 pinocchio=3.1.0 numpy=1.26.4 -y --override-channels -c conda-forge
+conda activate teleop
+
+cd /home/robot/eai-teleop-studio
+pip install -r requirements.txt
+pip install -e teleop/teleimager --no-deps
+pip install -e teleop/televuer
+pip install -e teleop/robot_control/dex-retargeting
+```
+
+安装 Unitree SDK：
+
+```bash
+cd /home/robot
+git clone https://github.com/unitreerobotics/unitree_sdk2_python.git
+cd /home/robot/unitree_sdk2_python
+conda activate teleop
+pip install -e .
+```
+
+验证：
+
+```bash
+cd /home/robot/eai-teleop-studio
+conda activate teleop
+
+python - <<'PY'
+import numpy
+import unitree_sdk2py
+from vuer import Vuer
+print("numpy", numpy.__version__)
+print("imports ok")
+PY
+```
+
+### 数据转换服务 lerobot
+
+```bash
+conda create -n lerobot python=3.12 numpy=1.26.4 -y --override-channels -c conda-forge
+conda activate lerobot
+pip install "numpy==1.26.4" pillow tyro datasets==3.6.0 huggingface_hub safetensors lerobot==0.3.3
+pip check
+```
+
+验证：
+
+```bash
+conda activate lerobot
+python - <<'PY'
+import numpy
+import lerobot
+print("numpy:", numpy.__version__)
+print("lerobot:", getattr(lerobot, "__version__", "unknown"))
+try:
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+except ImportError:
+    from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+print("LeRobotDataset ok")
+PY
 ```
 
 ## 日志规划
@@ -51,17 +166,7 @@ logs/app/h2_switch_flip_api_17002.nohup.out
 
 这些常驻服务日志不在启动时追加时间戳。当前日志保持固定文件名，方便服务写入和 `tail -f`；历史日志由 logrotate 自动轮转、压缩并追加日期后缀。logrotate 只处理 `logs/app/*.log` 和 `logs/app/*.out`，不处理 `logs/system/` 和 `logs/tasks/`。
 
-默认轮转策略位于：
-
-```text
-config/eai-teleop-studio.logrotate
-```
-
-安装自启动服务时会自动安装到：
-
-```text
-/etc/logrotate.d/eai-teleop-studio
-```
+默认轮转策略位于 `config/eai-teleop-studio.logrotate`。安装自启动服务时会自动安装到 `/etc/logrotate.d/eai-teleop-studio`。
 
 默认规则：
 
@@ -72,11 +177,7 @@ config/eai-teleop-studio.logrotate
 使用 copytruncate，服务无需重启即可继续写当前日志
 ```
 
-Web 平台业务日志按日期放到 `logs/system/`：
-
-```text
-logs/system/teleop_YYYY-MM-DD.log
-```
+Web 平台业务日志按日期放到 `logs/system/teleop_YYYY-MM-DD.log`。
 
 数据转换、归一化、OSS 上传/下载等任务日志按任务名和日期分目录：
 
@@ -93,68 +194,214 @@ logs/tasks/h2_switch_flip_api/YYYY-MM-DD/YYYYmmdd_HHMMSS_<task_id>/
   debug_images/
 ```
 
-## 系统准备
+## 相机服务
 
-```bash
-sudo apt update
-sudo apt install -y \
-  git curl wget rsync build-essential python3-dev \
-  ffmpeg libusb-1.0-0-dev libturbojpeg0-dev v4l-utils openssl
+相机配置文件：
+
+```text
+teleop/teleimager/cam_config_server.yaml
 ```
 
-## 克隆项目
+### 生成 HTTPS 证书
+
+WebRTC 使用 HTTPS。证书建议包含相机服务对外访问地址和本机地址：
+
 ```bash
-cd /home/robot
-git clone https://github.com/eaperisp/eai-teleop-studio eai-teleop-studio
+cd /home/robot/eai-teleop-studio
+mkdir -p config
+
+openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+  -keyout config/key.pem \
+  -out config/cert.pem
+
+chmod 600 config/key.pem
 ```
 
-Miniconda：
+### 查找相机配置
 
-```bash
-mkdir -p ~/miniconda3
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
-bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
-rm ~/miniconda3/miniconda.sh
-~/miniconda3/bin/conda init bash
-~/miniconda3/bin/conda config --set auto_activate false
-source ~/.bashrc
+核心规则是看每个 `/dev/videoX` 的 `serial_number`、`usb_interface`、`video_index` 和 `formats`：
+
+```text
+formats=YUYV/MJPG  -> RGB 节点
+formats=Z16        -> 深度节点
+formats=GREY/BA81  -> 不选
+formats 为空       -> 不选
 ```
 
-## Python 环境
-
-Web、遥操和 API 使用 `teleop`：
+列出相机：
 
 ```bash
-conda create -n teleop python=3.10 pinocchio=3.1.0 numpy=1.26.4 -y --override-channels -c conda-forge
-conda activate teleop
-conda install pip -y --override-channels -c conda-forge
-
-cd /data02/app/eai-teleop-studio
-python -m pip install -U pip
-python -m pip install -r requirements.txt
-python -m pip install -e teleop/televuer
-python -m pip install -e teleop/robot_control/dex-retargeting
-```
-
-相机服务使用 `teleimager`：
-
-```bash
-conda create -n teleimager python=3.10 numpy=1.26.4 -y --override-channels -c conda-forge
+cd /home/robot/eai-teleop-studio
 conda activate teleimager
-cd /data02/app/eai-teleop-studio
-python -m pip install -U pip
-python -m pip install -e "teleop/teleimager[server]"
+python tools/generate_h2_camera_config.py --list
 ```
 
-LeRobot 转换和 OpenPI 归一化使用 `lerobot`：
+生成配置草稿：
 
 ```bash
-conda create -n lerobot python=3.12 numpy=1.26.4 -y --override-channels -c conda-forge
-conda activate lerobot
-conda install pip -y --override-channels -c conda-forge
-python -m pip install -U pip
-python -m pip install "numpy==1.26.4" pillow tyro datasets==3.6.0 huggingface_hub safetensors lerobot==0.3.3
-python -m pip check
+python tools/generate_h2_camera_config.py \
+  --head-serial <head_serial> \
+  --torso-serial <torso_serial> \
+  --left-serial <left_wrist_serial> \
+  --right-serial <right_wrist_serial> \
+  --depth head \
+  --head-color-size 1920x1080 \
+  --head-depth-size 1280x800 \
+  -o /tmp/cam_config_server.yaml
+```
+
+`--depth` 可选值：
+
+```text
+不传或 head  生成 4 路 RGB + 头部 RGB-D 模板
+none         只生成 4 路 RGB
+all          生成 4 路 RGB + 头部/腰部/左腕/右腕 4 路 RGB-D 模板
+```
+
+如果现场只插了一部分相机，可以加 `--allow-missing` 生成草稿。确认无误后再覆盖正式配置：
+
+```bash
+cp teleop/teleimager/cam_config_server.yaml teleop/teleimager/cam_config_server.yaml.bak_$(date +%Y%m%d_%H%M%S)
+cp /tmp/cam_config_server.yaml teleop/teleimager/cam_config_server.yaml
+```
+
+端口建议：
+
+```text
+RGB ZMQ:      55555 head, 55556 torso, 55557 left_wrist, 55558 right_wrist
+Depth ZMQ:    55559 head_depth, 55560 left_wrist_depth, 55561 right_wrist_depth, 55562 torso_depth
+WebRTC RGB:   60001 head, 60002 torso, 60003 left_wrist, 60004 right_wrist
+配置服务:     60000
+```
+
+注意：
+
+```text
+深度 enable_webrtc 目前没有实际作用，保持 false。
+WebRTC 是 RGB 预览视频，算法要原始深度请走 ZMQ。
+数据采集只录 RGB，data_format: depth_z16 不会进入 RGB 录制列表。
+```
+
+### 手动启动相机服务
+
+```bash
+conda activate teleimager
+cd /home/robot/eai-teleop-studio
+
+XR_TELEOP_WEBRTC_SCHEME=https \
+XR_TELEOP_CERT=/home/robot/eai-teleop-studio/config/cert.pem \
+XR_TELEOP_KEY=/home/robot/eai-teleop-studio/config/key.pem \
+python -m teleimager.image_server --no-affinity
+```
+
+检查端口：
+
+```bash
+ss -ltnp | grep -E ':60000|:60001|:60002|:60003|:60004|:55555|:55559'
+curl -k -I https://127.0.0.1:60001/
+```
+
+浏览器检查：
+
+```text
+https://<相机服务 IP>:60001/
+https://<相机服务 IP>:60002/
+https://<相机服务 IP>:60003/
+https://<相机服务 IP>:60004/
+```
+
+首次打开自签名 HTTPS 时，需要在浏览器里信任证书。
+
+测试头部深度：
+
+```bash
+cd /home/robot/eai-teleop-studio
+conda activate teleimager
+python teleop/teleimager/examples/head_depth_client_demo.py --host 127.0.0.1 --frames 12 --timeout 5
+```
+
+### systemd 安装相机服务
+
+```bash
+cd /home/robot/eai-teleop-studio
+sudo bash scripts/install_autostart_services.sh teleimager-camera-capture.service
+sudo systemctl restart teleimager-camera-capture.service
+```
+
+常用命令：
+
+```bash
+systemctl status teleimager-camera-capture.service --no-pager
+journalctl -u teleimager-camera-capture.service -n 120 --no-pager
+tail -f /home/robot/eai-teleop-studio/logs/app/teleimager-camera-capture.service.log
+```
+
+## Web 数据采集平台
+
+手动启动：
+
+```bash
+conda activate teleop
+cd /home/robot/eai-teleop-studio
+
+XR_TELEOP_DATA_DIR=/home/robot/data \
+XR_TELEOP_DEFAULT_WEBRTC_SERVER_IP=<相机服务 IP> \
+XR_TELEOP_DEFAULT_IMAGE_SERVER_IP=<相机服务 IP> \
+XR_TELEOP_WEBRTC_SCHEME=https \
+XR_TELEOP_LEROBOT_PYTHON=/home/robot/miniconda3/envs/lerobot/bin/python \
+HF_LEROBOT_HOME=/home/robot/data/datasets/lerobot \
+python -m teleop_web.server \
+  --host 0.0.0.0 \
+  --port 18099 \
+  --dataset-dir /home/robot/data/datasets/robot \
+  --config /home/robot/eai-teleop-studio/config/web_console.json \
+  --task-file /home/robot/data/datasets/robot/tasks.json \
+  --log-dir /home/robot/eai-teleop-studio/logs
+```
+
+访问：
+
+```text
+http://<机器人 IP>:18099/
+```
+
+状态检查：
+
+```bash
+curl -s http://127.0.0.1:18099/api/state | python -m json.tool | sed -n '1,160p'
+```
+
+设备页面建议：
+
+```text
+机器人型号: H2
+图像服务 IP: <相机服务 IP>
+WebRTC 服务 IP: <相机服务 IP>
+数据目录: /home/robot/data
+DDS 网络接口: 按现场 H2 网卡填写
+显示模式: pass-through 或 head
+VR 相机视角: head
+```
+
+如果相机服务不在 Web 服务所在机器，图像服务 IP 和 WebRTC 服务 IP 必须填写实际运行 `teleimager.image_server` 的机器 IP。
+
+配置文件优先放在 `config/`。训练命令模板使用 `config/delivery_templates.json`。运行态数据和较大的任务状态放到 `/home/robot/data/datasets/...`，不要放在项目代码目录。
+
+安装 Web 自启动服务：
+
+```bash
+cd /home/robot/eai-teleop-studio
+sudo bash scripts/install_autostart_services.sh xr-teleop-web.service
+sudo systemctl restart xr-teleop-web.service
+```
+
+常用命令：
+
+```bash
+systemctl status xr-teleop-web.service --no-pager
+journalctl -u xr-teleop-web.service -f
+tail -f /home/robot/eai-teleop-studio/logs/app/xr-teleop-web.service.log
+tail -f /home/robot/eai-teleop-studio/logs/system/teleop_$(date +%F).log
 ```
 
 ## 开机自启服务
@@ -162,7 +409,7 @@ python -m pip check
 项目提供 4 个 systemd 服务：
 
 ```text
-xr-teleop-web.service                 Web 数据采集平台，端口 18088
+xr-teleop-web.service                 Web 数据采集平台，端口 18099
 teleimager-camera-capture.service     相机 WebRTC/ZMQ 服务
 robot-sync-tool.service               数据同步工具，默认端口 18090
 h2-switch-flip-api.service            H2 拨闸 API，端口 17002
@@ -171,7 +418,7 @@ h2-switch-flip-api.service            H2 拨闸 API，端口 17002
 安装全部服务：
 
 ```bash
-cd /data02/app/eai-teleop-studio
+cd /home/robot/eai-teleop-studio
 sudo bash scripts/install_autostart_services.sh
 ```
 
@@ -199,106 +446,16 @@ sudo systemctl restart robot-sync-tool.service
 sudo systemctl restart h2-switch-flip-api.service
 ```
 
-查看日志：
-
-```bash
-journalctl -u xr-teleop-web.service -f
-tail -f logs/app/xr-teleop-web.service.log
-tail -f logs/system/teleop_$(date +%F).log
-```
-
-## Web 数据采集平台
-
-手动启动：
-
-```bash
-cd /data02/app/eai-teleop-studio
-/home/robot/miniconda3/envs/teleop/bin/python3 -m teleop_web.server \
-  --host 0.0.0.0 \
-  --port 18088 \
-  --config config/web_console.json \
-  --log-dir logs
-```
-
-访问：
-
-```text
-http://<机器人或训练服务器 IP>:18088
-```
-
-状态检查：
-
-```bash
-curl -s http://127.0.0.1:18088/api/state | python -m json.tool | sed -n '1,160p'
-```
-
-配置文件优先放在 `config/`。训练命令模板使用：
-
-```text
-config/delivery_templates.json
-```
-
-运行态数据和较大的任务状态放到 `/data03/data/datasets/...`，不要放在项目代码目录。
-
-## 相机服务
-
-相机配置：
-
-```text
-teleop/teleimager/cam_config_server.yaml
-```
-
-证书：
-
-```bash
-cd /data02/app/eai-teleop-studio
-mkdir -p config
-openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-  -keyout config/key.pem \
-  -out config/cert.pem \
-  -subj "/CN=192.168.61.228" \
-  -addext "subjectAltName=IP:192.168.61.228,IP:192.168.61.142"
-chmod 600 config/key.pem
-```
-
-检查相机：
-
-```bash
-ls -l /dev/video*
-v4l2-ctl --list-devices
-```
-
-浏览器检查：
-
-```text
-https://<相机服务 IP>:60001/
-https://<相机服务 IP>:60002/
-https://<相机服务 IP>:60003/
-https://<相机服务 IP>:60004/
-```
-
-如果 Web 服务在 228，但相机服务在 142，设备页面中的 WebRTC 服务 IP 应填写实际运行 `teleimager.image_server` 的机器 IP。
-
 ## 数据同步工具
 
-配置示例：
-
-```text
-config/robot_sync.env.example
-```
-
-首次安装时会生成：
-
-```text
-config/robot_sync.env
-```
+配置示例：`config/robot_sync.env.example`。首次安装时会生成 `config/robot_sync.env`。
 
 关键配置：
 
 ```env
-ROBOT_SYNC_REMOTE_HOST=robot@192.168.61.142
+ROBOT_SYNC_REMOTE_HOST=robot@<远端机器 IP>
 ROBOT_SYNC_REMOTE_DIR=~/data/datasets/robot
-ROBOT_SYNC_LOCAL_DIR=/data03/data/datasets/robot
+ROBOT_SYNC_LOCAL_DIR=/home/robot/data/datasets/robot
 ROBOT_SYNC_RECORDS_FILE=data/robot_sync_records.json
 ROBOT_SYNC_LOG_FILE=logs/app/robot_sync.log
 ```
@@ -306,13 +463,58 @@ ROBOT_SYNC_LOG_FILE=logs/app/robot_sync.log
 单独安装同步工具：
 
 ```bash
-cd /data02/app/eai-teleop-studio
+cd /home/robot/eai-teleop-studio
 sudo bash scripts/robot_sync/install_autostart.sh
+```
+
+### 移动硬盘同步
+
+挂载硬盘：
+
+```bash
+sudo mkdir -p /media/robot/<源盘名称> /media/robot/<目标盘名称>
+sudo chown robot:robot /media/robot/<源盘名称> /media/robot/<目标盘名称>
+
+sudo mount -t exfat \
+  -o uid=$(id -u robot),gid=$(id -g robot),umask=0022 \
+  LABEL=<源盘卷标> /media/robot/<源盘名称>
+
+sudo mount -t exfat \
+  -o uid=$(id -u robot),gid=$(id -g robot),umask=0022 \
+  LABEL=<目标盘卷标> /media/robot/<目标盘名称>
+```
+
+模拟检查将要同步的内容：
+
+```bash
+rsync -rtvhn \
+  --modify-window=1 \
+  --info=progress2 \
+  "/media/robot/<源盘名称>/data/" \
+  "/media/robot/<目标盘名称>/data/"
+```
+
+正式同步：
+
+```bash
+sudo rsync -rtvh \
+  --modify-window=1 \
+  --info=progress2 \
+  --partial \
+  "/media/robot/<源盘名称>/data/" \
+  "/media/robot/<目标盘名称>/data/"
+```
+
+卸载硬盘：
+
+```bash
+sudo umount /media/robot/<源盘名称>
+sudo umount /media/robot/<目标盘名称>
 ```
 
 ## LeRobot 转换
 
-Web 页面会根据 `datasets/robot/tasks.json` 中的任务名和 instruction 生成转换参数。转换输出支持图片和视频编码，保留 `png`、`jpg/jpeg`，并支持 `video`。
+Web 页面会根据 `/home/robot/data/datasets/robot/tasks.json` 中的任务名和 instruction 生成转换参数。转换输出支持图片和视频编码，保留 `png`、`jpg/jpeg`，并支持 `video`。
 
 `video` 会把每路相机编码为 LeRobot MP4，CPU 和磁盘压力明显高于 `jpg/png`。当前默认策略：
 
@@ -327,14 +529,14 @@ video 模式：image-writer-processes=2，image-writer-threads=4
 
 ```bash
 conda activate lerobot
-cd /data02/app/eai-teleop-studio
-export HF_LEROBOT_HOME=/data03/data/datasets/lerobot
+cd /home/robot/eai-teleop-studio
+export HF_LEROBOT_HOME=/home/robot/data/datasets/lerobot
 
 python tools/convert_h2_to_lerobot.py \
-  --src /data03/data/datasets/robot/<task_name> \
+  --src /home/robot/data/datasets/robot/<task_name> \
   --repo-id local/<task_name> \
   --robot-type robot \
-  --urdf assets/h2/H2.urdf \
+  --urdf /home/robot/eai-teleop-studio/assets/h2/H2.urdf \
   --dry-run
 ```
 
@@ -342,32 +544,49 @@ python tools/convert_h2_to_lerobot.py \
 
 ```bash
 python tools/convert_h2_to_lerobot.py \
-  --src /data03/data/datasets/robot/<task_name> \
+  --src /home/robot/data/datasets/robot/<task_name> \
   --repo-id local/<task_name> \
   --robot-type robot \
   --task "<instruction>" \
-  --urdf assets/h2/H2.urdf \
+  --urdf /home/robot/eai-teleop-studio/assets/h2/H2.urdf \
   --camera-map color_0:image,color_2:left_wrist_image,color_3:right_wrist_image \
-  --image-encoding video \
-  --image-writer-processes 2 \
-  --image-writer-threads 4 \
-  --batch-size 50 \
-  --overwrite
+  --image-writer-processes 0 \
+  --image-writer-threads 2 \
+  --overwrite \
+  --batch-size 50
 ```
 
 断点续转：
 
 ```bash
 python tools/convert_h2_to_lerobot.py \
-  --src /data03/data/datasets/robot/<task_name> \
+  --src /home/robot/data/datasets/robot/<task_name> \
   --repo-id local/<task_name> \
   --robot-type robot \
   --task "<instruction>" \
-  --urdf assets/h2/H2.urdf \
+  --urdf /home/robot/eai-teleop-studio/assets/h2/H2.urdf \
   --camera-map color_0:image,color_2:left_wrist_image,color_3:right_wrist_image \
+  --image-writer-processes 0 \
+  --image-writer-threads 2 \
   --resume \
   --resume-overlap 2 \
   --batch-size 50
+```
+
+常用 camera-map：
+
+```text
+三路: head + left_wrist + right_wrist
+color_0:image,color_2:left_wrist_image,color_3:right_wrist_image
+
+如果只有 head + torso + right_wrist:
+color_0:image,color_1:left_wrist_image,color_2:right_wrist_image
+```
+
+输出检查：
+
+```bash
+find /home/robot/data/datasets/lerobot/local/<task_name> -maxdepth 3 -type f | sort | sed -n '1,120p'
 ```
 
 ## OpenPI
@@ -375,52 +594,74 @@ python tools/convert_h2_to_lerobot.py \
 OpenPI 推荐目录：
 
 ```text
-/data02/app/openpi
+/home/robot/openpi
+```
+
+安装：
+
+```bash
+cd /home/robot
+git clone --recurse-submodules https://github.com/Physical-Intelligence/openpi.git
+cd /home/robot/openpi
+git submodule update --init --recursive
+
+conda activate lerobot
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH
+python -m pip install -e .
 ```
 
 归一化前检查：
 
 ```bash
-test -f /data03/data/datasets/lerobot/local/<task_name>/meta/info.json
-test -f /data02/app/openpi/scripts/compute_norm_stats.py
+test -f /home/robot/data/datasets/lerobot/local/<task_name>/meta/info.json
+test -f /home/robot/openpi/scripts/compute_norm_stats.py
 ```
 
 手动归一化：
 
 ```bash
 conda activate lerobot
-cd /data03/data/datasets/openpi
+cd /home/robot/data/datasets/openpi
 
-export HF_LEROBOT_HOME=/data03/data/datasets/lerobot
+export HF_LEROBOT_HOME=/home/robot/data/datasets/lerobot
 export HF_HUB_OFFLINE=1
 export OPENPI_H2_REPO_ID=local/<task_name>
-export PYTHONPATH=/data02/app/openpi/src
+export PYTHONPATH=/home/robot/openpi/src
 
 /home/robot/miniconda3/envs/lerobot/bin/python \
-  /data02/app/openpi/scripts/compute_norm_stats.py \
+  /home/robot/openpi/scripts/compute_norm_stats.py \
   --config-name pi05_h2_lerobot
+```
+
+如果推理服务缺少 `openpi_client`，在 OpenPI 目录安装 client 包：
+
+```bash
+cd /home/robot/openpi
+uv pip install --python ./.venv/bin/python -e packages/openpi-client
+./.venv/bin/python -c "import openpi_client; print(openpi_client.__file__)"
+```
+
+启动推理服务示例：
+
+```bash
+cd /home/robot/openpi
+OPENPI_ROOT=/home/robot/openpi nohup ./scripts/deploy/run_pi05_h2_server.sh > logs/h2_openpi_server.log 2>&1 &
+tail -f logs/h2_openpi_server.log
 ```
 
 模型部署命令由训练模板生成，`DEFAULT_PROMPT` 使用采集任务中的 instruction。
 
 ## H2 拨闸 API
 
-API 脚本：
+API 脚本：`api/h2_switch_flip_api.py`。
 
-```text
-api/h2_switch_flip_api.py
-```
-
-systemd 服务：
-
-```text
-h2-switch-flip-api.service
-```
+systemd 服务：`h2-switch-flip-api.service`。
 
 手动启动：
 
 ```bash
-cd ~/eai-teleop-studio
+cd /home/robot/eai-teleop-studio
 mkdir -p logs/app logs/tasks
 
 nohup /home/robot/miniconda3/envs/teleop/bin/python3 api/h2_switch_flip_api.py \
@@ -462,6 +703,54 @@ Change the switch from close to remote
 Change the switch from remote to close
 ```
 
+## 验收清单
+
+相机服务：
+
+```bash
+systemctl status teleimager-camera-capture.service --no-pager
+journalctl -u teleimager-camera-capture.service -n 120 --no-pager
+ss -ltnp | grep -E ':60000|:60001|:60002|:60003|:60004'
+```
+
+浏览器：
+
+```text
+https://<相机服务 IP>:60001/
+https://<相机服务 IP>:60002/
+https://<相机服务 IP>:60003/
+https://<相机服务 IP>:60004/
+http://<机器人 IP>:18088/
+```
+
+深度数据：
+
+```bash
+cd /home/robot/eai-teleop-studio
+conda activate teleimager
+python teleop/teleimager/examples/head_depth_client_demo.py --host 127.0.0.1 --frames 12 --timeout 5
+```
+
+Web 服务：
+
+```bash
+curl -s http://127.0.0.1:18088/api/state | python -m json.tool | sed -n '1,160p'
+```
+
+转换服务：
+
+```bash
+conda activate lerobot
+cd /home/robot/eai-teleop-studio
+export HF_LEROBOT_HOME=/home/robot/data/datasets/lerobot
+python tools/convert_h2_to_lerobot.py \
+  --src /home/robot/data/datasets/robot/<task_name> \
+  --repo-id local/<task_name> \
+  --robot-type robot \
+  --urdf /home/robot/eai-teleop-studio/assets/h2/H2.urdf \
+  --dry-run
+```
+
 ## 常用排查
 
 Web 服务：
@@ -469,7 +758,7 @@ Web 服务：
 ```bash
 ps -ef | grep '[t]eleop_web.server'
 ss -lntp | grep 18088
-tail -n 100 logs/system/teleop_$(date +%F).log
+tail -n 100 /home/robot/eai-teleop-studio/logs/system/teleop_$(date +%F).log
 ```
 
 相机服务：
@@ -477,13 +766,15 @@ tail -n 100 logs/system/teleop_$(date +%F).log
 ```bash
 systemctl status teleimager-camera-capture.service --no-pager
 journalctl -u teleimager-camera-capture.service -n 100 --no-pager
+ss -ltnp | grep -E ':60000|:60001|:55555|:55559'
+python teleop/teleimager/examples/head_depth_client_demo.py --host 127.0.0.1 --frames 12
 ```
 
 API 服务：
 
 ```bash
 systemctl status h2-switch-flip-api.service --no-pager
-tail -f logs/app/h2_switch_flip_api_17002.log
+tail -f /home/robot/eai-teleop-studio/logs/app/h2_switch_flip_api_17002.log
 ```
 
 数据转换卡住：
@@ -491,12 +782,13 @@ tail -f logs/app/h2_switch_flip_api_17002.log
 ```bash
 pgrep -af 'convert_h2_to_lerobot|compute_norm_stats|teleop_hand_and_arm|ossutil'
 free -h
+ps -o pid,ppid,pgid,stat,etime,%cpu,%mem,rss,vsz,cmd -C python
 ```
 
 检查是否仍有旧路径：
 
 ```bash
-grep -RIn '/home/ubuntu\|eai_teleoperate_studio' config systemd teleop_web api tools | head
+grep -RIn '/data02\|/data03\|/home/ubuntu\|eai_teleoperate_studio' config systemd teleop_web api tools | head
 ```
 
 ## 常见问题
@@ -507,12 +799,100 @@ grep -RIn '/home/ubuntu\|eai_teleoperate_studio' config systemd teleop_web api t
 
 ```bash
 systemctl cat xr-teleop-web.service
-ls /data02/app/eai-teleop-studio/teleop_web
+ls /home/robot/eai-teleop-studio/teleop_web
 ```
 
 ### 页面能打开，但相机预览灰屏
 
 确认设备页面的 WebRTC 服务 IP 是实际运行相机服务的机器，而不是固定填 Web 服务机器。自签 HTTPS 证书需要浏览器先信任一次。
+
+### 60001 无法访问
+
+先确认端口是否监听：
+
+```bash
+ss -ltnp | grep 60001
+```
+
+如果没有监听，看日志：
+
+```bash
+journalctl -u teleimager-camera-capture.service -n 120 --no-pager
+```
+
+常见原因：
+
+```text
+head_camera offline
+配置里的 serial_number 不在 /dev/v4l/by-id 中
+相机被 Orbbec SDK/ROS 占用，lsusb -t 显示 Driver=usbfs
+配置用了 1920x1080@30，但当前 USB2 只支持低帧率
+```
+
+### 相机节点很多，不知道怎么选
+
+只看格式：
+
+```text
+YUYV/MJPG  -> RGB
+Z16        -> 深度
+GREY/BA81  -> 不选
+空 formats -> 不选
+```
+
+示例：
+
+```text
+serial + interface=1.4 + index=0 -> RGB
+serial + interface=1.0 + index=0 -> depth
+```
+
+### 深度 demo 报 enable_zmq false
+
+说明客户端拿到的配置里深度没有开启，或者请求服务端失败后读了旧缓存。检查服务端返回：
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, "/home/robot/eai-teleop-studio/teleop/teleimager/src")
+from teleimager.image_client import ImageClient
+c = ImageClient(host="127.0.0.1", request_bgr=False)
+print(c.get_cam_config().get("head_depth_camera"))
+c.close()
+PY
+```
+
+如果请求远端：
+
+```bash
+nc -vz <相机服务 IP> 60000
+```
+
+必要时删除客户端缓存：
+
+```bash
+rm -f /home/robot/eai-teleop-studio/teleop/teleimager/cam_config_client.yaml
+```
+
+### 转换慢或失败
+
+大数据集建议：
+
+```bash
+--batch-size 50 --image-writer-processes 0 --image-writer-threads 2
+```
+
+观察进程和内存：
+
+```bash
+free -h
+pgrep -af 'convert_h2_to_lerobot|compute_norm_stats|teleop_hand_and_arm'
+ps -o pid,ppid,pgid,stat,etime,%cpu,%mem,rss,vsz,cmd -C python
+```
+
+### 数据采集是否会录深度
+
+不会。采集脚本只把 `data_format` 为空或 jpeg 的相机当 RGB 录制。`data_format: depth_z16` 只给算法服务或 demo 主动读取。
 
 ### 配置修改后页面仍然旧
 
