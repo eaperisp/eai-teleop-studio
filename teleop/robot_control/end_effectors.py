@@ -19,7 +19,9 @@ ACTIVE_END_EFFECTORS = frozenset({
 DISPLAY_END_EFFECTORS = ("dex1", "dex3", "inspire", "inspire_ftp", "inspire_dfx", "brainco")
 SIDE_END_EFFECTORS = ("none", "rubber", *DISPLAY_END_EFFECTORS)
 
-SINGLE_SIDE_ACTIVE_END_EFFECTORS = frozenset({"inspire_dfx", "inspire_ftp"})
+# Every active controller must support side isolation. A passive peer therefore
+# never receives command messages, regardless of the active hand type.
+SINGLE_SIDE_ACTIVE_END_EFFECTORS = ACTIVE_END_EFFECTORS
 
 
 def canonical_end_effector(value):

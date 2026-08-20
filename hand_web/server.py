@@ -8,6 +8,7 @@ import json
 import mimetypes
 import os
 import socket
+import ssl
 import sys
 import time
 import traceback
@@ -32,6 +33,7 @@ from teleop.utils.daily_file_logger import DailyFileLogger  # noqa: E402
 APP_ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = APP_ROOT / "static"
 BRAINCO_ASSET_ROOT = PROJECT_ROOT / "assets" / "brainco_hand"
+INSPIRE_ASSET_ROOT = PROJECT_ROOT / "assets" / "inspire_hand"
 DEFAULT_CONFIG_PATH = APP_ROOT / "config.json"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "logs"
 HAND_WEB_PORT = 18089
@@ -172,6 +174,12 @@ class HandWebHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         error: str | None = None
         try:
+            if path == "/api/vision/frame":
+                self._continuous_command = True
+                result = self.vision.submit_frame(self._read_binary(2 * 1024 * 1024))
+                self._json(result)
+                return
+
             payload = self._read_json()
             self._continuous_command = path == "/api/command" and payload.get("continuous") is True
             if not self._continuous_command:
@@ -251,16 +259,34 @@ class HandWebHandler(BaseHTTPRequestHandler):
             raise ValidationError("请求根节点必须是对象")
         return payload
 
+    def _read_binary(self, maximum: int) -> bytes:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValidationError("Content-Length 不正确") from exc
+        if length <= 0:
+            raise ValidationError("摄像头帧为空")
+        if length > maximum:
+            raise ValidationError("摄像头帧过大")
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type not in {"image/jpeg", "image/webp"}:
+            raise ValidationError("摄像头帧必须为 JPEG 或 WebP")
+        return self.rfile.read(length)
+
     def _require_vision_stopped(self) -> None:
         if self.vision.status()["running"]:
             raise RuntimeError("请先停止视觉控制")
 
     def _static(self, path: str) -> None:
-        asset_prefix = "/assets/brainco_hand/"
-        if path.startswith(asset_prefix):
-            relative_path = unquote(path[len(asset_prefix) :])
-            self._file(BRAINCO_ASSET_ROOT, relative_path)
-            return
+        asset_roots = {
+            "/assets/brainco_hand/": BRAINCO_ASSET_ROOT,
+            "/assets/inspire_hand/": INSPIRE_ASSET_ROOT,
+        }
+        for asset_prefix, asset_root in asset_roots.items():
+            if path.startswith(asset_prefix):
+                relative_path = unquote(path[len(asset_prefix) :])
+                self._file(asset_root, relative_path)
+                return
 
         filename = "index.html" if path == "/" else path.removeprefix("/")
         if filename not in STATIC_FILES:
@@ -331,7 +357,7 @@ class HandWebHandler(BaseHTTPRequestHandler):
         status = int(getattr(self, "_last_status", HTTPStatus.OK))
         if method == "GET" and path in {"/api/status", "/api/vision/status", "/api/vision/frame", "/api/vision/calibration"} and status < 400 and not error:
             return
-        if method == "POST" and path == "/api/command" and self._continuous_command and status < 400 and not error:
+        if method == "POST" and path in {"/api/command", "/api/vision/frame"} and self._continuous_command and status < 400 and not error:
             return
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         level = "error" if status >= 500 else "warning" if status >= 400 else "access"
@@ -356,6 +382,9 @@ def main() -> None:
     parser.add_argument("--host", default=None, help="监听地址，覆盖 config.json")
     parser.add_argument("--port", type=int, default=None, help="HTTP 端口，必须为 18089")
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR, help="按天保存的平台日志目录")
+    parser.add_argument("--scheme", choices=("http", "https"), default=None, help="监听协议")
+    parser.add_argument("--cert", type=Path, default=None, help="HTTPS 证书")
+    parser.add_argument("--key", type=Path, default=None, help="HTTPS 私钥")
     args = parser.parse_args()
 
     config_path = args.config.expanduser().resolve()
@@ -368,6 +397,17 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
     log_dir = args.log_dir.expanduser().resolve()
+    scheme = args.scheme or os.environ.get("HAND_WEB_SCHEME", "http").strip().lower()
+    if scheme not in {"http", "https"}:
+        parser.error("HAND_WEB_SCHEME 必须是 http 或 https")
+    cert_value = args.cert or os.environ.get("HAND_WEB_CERT")
+    key_value = args.key or os.environ.get("HAND_WEB_KEY")
+    cert_path = Path(cert_value).expanduser().resolve() if cert_value else None
+    key_path = Path(key_value).expanduser().resolve() if key_value else None
+    if scheme == "https" and (
+        cert_path is None or key_path is None or not cert_path.is_file() or not key_path.is_file()
+    ):
+        parser.error("HTTPS 需要有效的 HAND_WEB_CERT 和 HAND_WEB_KEY")
 
     logger = DailyFileLogger(log_dir, filename_prefix="hand_web")
     instance_lock = SingleInstanceLock(INSTANCE_LOCK_PATH)
@@ -385,20 +425,25 @@ def main() -> None:
     HandWebHandler.logger = logger
     try:
         server = ExclusiveThreadingHTTPServer((host, port), HandWebHandler)
+        if scheme == "https":
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(cert_path, key_path)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
     except OSError as exc:
         logger.write("error", "hand web server bind failed", host=host, port=port, error=str(exc))
         service.close()
         instance_lock.release()
-        raise SystemExit(f"无法监听 http://{host}:{port}，请检查是否已有调试服务运行：{exc}") from exc
+        raise SystemExit(f"无法监听 {scheme}://{host}:{port}，请检查是否已有调试服务运行：{exc}") from exc
     logger.write(
         "info",
         "hand web server started",
         host=host,
         port=port,
+        scheme=scheme,
         config_file=str(config_path),
         operation_log=str(logger.path_for_today()),
     )
-    print(f"灵巧手调试工具: http://{host}:{port}")
+    print(f"灵巧手调试工具: {scheme}://{host}:{port}")
     print(f"操作日志: {logger.path_for_today()}")
     print("提示: 官方上位机、遥操与本工具不能同时控制同一只灵巧手。")
     try:

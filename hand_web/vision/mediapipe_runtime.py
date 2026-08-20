@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import queue
 import time
 from typing import Any
 
@@ -26,7 +27,11 @@ class MediaPipeRuntime:
 
         self.cv2 = cv2
         self.mp = mp
+        self.np = __import__("numpy")
         self.side = str(config.get("side", "right")).lower()
+        self.source = str(config.get("source", "browser")).strip().lower()
+        if self.source not in {"browser", "server"}:
+            raise ValueError("source 必须是 browser 或 server")
         self.camera = int(config.get("camera", 0))
         self.width = int(config.get("width", 960))
         self.height = int(config.get("height", 540))
@@ -34,12 +39,15 @@ class MediaPipeRuntime:
         if os.name == "nt":
             backends.extend([cv2.CAP_DSHOW, cv2.CAP_MSMF])
         self.backends = list(dict.fromkeys(backends))
-        self.capture = self._open_capture()
+        self.capture = self._open_capture() if self.source == "server" else None
+        self._browser_frames: queue.Queue[bytes] = queue.Queue(maxsize=1)
+        self._closed = False
         try:
             hands_api = mp.solutions.hands
             self._drawing = mp.solutions.drawing_utils
         except AttributeError as exc:
-            self.capture.release()
+            if self.capture is not None:
+                self.capture.release()
             raise VisionDependencyError("当前 MediaPipe 版本不包含 Hands API，请安装 requirements-vision.txt 中指定的版本") from exc
         self._hands_api = hands_api
         self._hands = hands_api.Hands(
@@ -51,9 +59,12 @@ class MediaPipeRuntime:
         )
 
     def read(self) -> tuple[Any, HandDetection | None]:
-        ok, frame = self._read_frame()
+        ok, frame = self._read_browser_frame() if self.source == "browser" else self._read_frame()
+        if self.source == "browser" and not ok:
+            return None, None
         if not ok or frame is None:
             raise RuntimeError("摄像头画面读取失败")
+        frame = self._color_frame(frame)
         frame = self.cv2.flip(frame, 1)
         rgb = self.cv2.cvtColor(frame, self.cv2.COLOR_BGR2RGB)
         rgb.flags.writeable = False
@@ -81,6 +92,49 @@ class MediaPipeRuntime:
             )
             break
         return frame, detection
+
+    def submit_frame(self, payload: bytes) -> None:
+        if self.source != "browser":
+            raise RuntimeError("当前视觉来源不是浏览器摄像头")
+        if self._closed:
+            raise RuntimeError("视觉运行时已经关闭")
+        if not payload:
+            raise ValueError("浏览器摄像头帧为空")
+        try:
+            self._browser_frames.put_nowait(payload)
+        except queue.Full:
+            try:
+                self._browser_frames.get_nowait()
+            except queue.Empty:
+                pass
+            self._browser_frames.put_nowait(payload)
+
+    def _read_browser_frame(self) -> tuple[bool, Any]:
+        try:
+            payload = self._browser_frames.get(timeout=0.25)
+        except queue.Empty:
+            return False, None
+        encoded = self.np.frombuffer(payload, dtype=self.np.uint8)
+        frame = self.cv2.imdecode(encoded, self.cv2.IMREAD_COLOR)
+        if frame is None:
+            raise RuntimeError("浏览器摄像头画面解码失败")
+        return True, frame
+
+    def _color_frame(self, frame: Any) -> Any:
+        if getattr(frame, "dtype", None) != self.np.uint8:
+            raise RuntimeError(
+                f"摄像头 {self.camera} 返回 {getattr(frame, 'dtype', 'unknown')} 数据，"
+                "该节点可能是深度流；请选择 YUYV/MJPG 彩色节点或使用浏览器摄像头"
+            )
+        if frame.ndim == 2:
+            return self.cv2.cvtColor(frame, self.cv2.COLOR_GRAY2BGR)
+        if frame.ndim != 3:
+            raise RuntimeError(f"不支持的摄像头画面维度: {frame.ndim}")
+        if frame.shape[2] == 4:
+            return self.cv2.cvtColor(frame, self.cv2.COLOR_BGRA2BGR)
+        if frame.shape[2] != 3:
+            raise RuntimeError(f"不支持的摄像头通道数: {frame.shape[2]}")
+        return frame
 
     def _read_frame(self) -> tuple[bool, Any]:
         for _ in range(4):
@@ -127,10 +181,12 @@ class MediaPipeRuntime:
         return encoded.tobytes()
 
     def close(self) -> None:
+        self._closed = True
         try:
             self._hands.close()
         finally:
-            self.capture.release()
+            if self.capture is not None:
+                self.capture.release()
 
     @staticmethod
     def _gesture(points: Any) -> str | None:

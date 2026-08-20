@@ -6,12 +6,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hand_web.core.service import HandControlService
+from hand_web.adapters.inspire import InspireDFXAdapter, InspireFTPAdapter
 from hand_web.server import SingleInstanceLock, validate_hand_web_port
 from teleop.robot_control.devices.base import normalize_positions
 from teleop.robot_control.devices.brainco import BraincoHandSDK
 from teleop.robot_control.devices.brainco.dds_transport import BraincoDDSTransport
 from teleop.robot_control.devices.brainco.modbus_transport import BraincoModbusTransport
 from teleop.robot_control.devices.brainco.modbus_transport import _normalize_port
+from teleop.robot_control.devices.inspire_dfx import InspireDFXHandSDK
 from teleop.utils.daily_file_logger import DailyFileLogger
 
 
@@ -69,6 +71,58 @@ class FakeModbusClient:
         return FakeMotorStatus()
 
 
+class FakeInspireState:
+    def __init__(self, side, angles):
+        self.side = side
+        self.angles = tuple(angles)
+
+
+class FakeInspireSDK:
+    state_angles = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+
+    def __init__(self, **options):
+        self.options = options
+        self.initialized = False
+        self.commands = []
+
+    def initialize(self):
+        self.initialized = True
+
+    def read_states(self, timeout=0.0):
+        del timeout
+        result = {}
+        if self.options["enable_left"]:
+            result["left"] = FakeInspireState("left", self.state_angles)
+        if self.options["enable_right"]:
+            result["right"] = FakeInspireState("right", self.state_angles)
+        return result
+
+    def command(self, side, angles):
+        values = list(angles)
+        self.commands.append((side, values))
+        return values
+
+
+class FakeDDSMotor:
+    def __init__(self, q):
+        self.q = q
+
+
+class FakeDDSState:
+    def __init__(self):
+        self.states = [FakeDDSMotor(index / 10) for index in range(12)]
+
+
+class FakeDDSSubscriber:
+    def __init__(self):
+        self.read_count = 0
+
+    def Read(self, timeout=0.0):
+        del timeout
+        self.read_count += 1
+        return FakeDDSState()
+
+
 class HandControlServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -84,6 +138,12 @@ class HandControlServiceTests(unittest.TestCase):
         self.assertEqual(device["id"], "brainco_revo2")
         self.assertEqual(len(device["joints"]), 6)
         self.assertEqual({item["id"] for item in device["transports"]}, {"dds", "modbus"})
+        self.assertEqual(payload["defaults"]["brainco_revo2"]["dds"]["network_interface"], "enp86s0")
+        self.assertEqual(payload["default_device"], "inspire_dfx")
+        self.assertEqual(
+            {item["id"] for item in payload["devices"]},
+            {"brainco_revo2", "inspire_dfx", "inspire_ftp"},
+        )
 
     @patch("hand_web.core.service.adapter_class", return_value=FakeAdapter)
     def test_connect_command_status_and_disconnect(self, _adapter_class):
@@ -205,6 +265,62 @@ class BraincoModelTests(unittest.TestCase):
             [joint["id"] for joint in capabilities["joints"]],
             ["thumb", "thumb_aux", "index", "middle", "ring", "pinky"],
         )
+
+
+class InspireAdapterTests(unittest.TestCase):
+    def test_dfx_reads_one_aggregate_sample_for_both_hands(self):
+        sdk = InspireDFXHandSDK(enable_left=True, enable_right=True)
+        subscriber = FakeDDSSubscriber()
+        sdk._initialized = True
+        sdk._subscriber = subscriber
+
+        states = sdk.read_states(timeout=0.01)
+
+        self.assertEqual(subscriber.read_count, 1)
+        self.assertEqual(states["right"].angles, (0.0, 0.1, 0.2, 0.3, 0.4, 0.5))
+        self.assertEqual(states["left"].angles, (0.6, 0.7, 0.8, 0.9, 1.0, 1.1))
+
+    def test_dfx_mapping_uses_web_order_and_open_closed_convention(self):
+        with patch.object(InspireDFXAdapter, "sdk_type", FakeInspireSDK):
+            adapter = InspireDFXAdapter()
+            adapter.connect("dds", {"network_interface": "enp86s0", "sides": "right"})
+            result = adapter.command("right", [0.0, 0.1, 0.2, 0.3, 0.4, 0.5], 500)
+
+        self.assertEqual(result["positions"], [0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
+        self.assertEqual(adapter._sdk.commands[-1], ("right", [0.5, 0.6, 0.7, 0.8, 1.0, 0.9]))
+        self.assertEqual(
+            adapter.status()["hands"]["right"]["positions"],
+            [0.5, 0.4, 0.6, 0.7, 0.8, 0.9],
+        )
+
+    def test_ftp_mapping_scales_to_vendor_units(self):
+        with patch.object(InspireFTPAdapter, "sdk_type", FakeInspireSDK):
+            adapter = InspireFTPAdapter()
+            adapter.connect("dds", {"sides": "left"})
+            adapter.command("left", [0.0, 0.1, 0.2, 0.3, 0.4, 0.5], 500)
+
+        self.assertEqual(adapter._sdk.commands[-1], ("left", [500, 600, 700, 800, 1000, 900]))
+
+    def test_idle_stop_does_not_publish_and_active_stop_holds_state(self):
+        with patch.object(InspireDFXAdapter, "sdk_type", FakeInspireSDK):
+            adapter = InspireDFXAdapter()
+            adapter.connect("dds", {"sides": "right"})
+            sdk = adapter._sdk
+            idle = adapter.stop()
+            adapter.command("right", [0.5] * 6, 0)
+            active = adapter.stop()
+
+        self.assertEqual(idle["message"], "当前没有执行中的运动")
+        self.assertEqual(len(sdk.commands), 2)
+        self.assertEqual(active["message"], "已停止更新目标并保持当前位置")
+
+    def test_inspire_capabilities_keep_semantic_joint_order(self):
+        capabilities = InspireDFXAdapter.capabilities()
+        self.assertEqual(
+            [joint["id"] for joint in capabilities["joints"]],
+            ["thumb", "thumb_aux", "index", "middle", "ring", "pinky"],
+        )
+        self.assertEqual(capabilities["preview"]["urdf"], "inspire_hand_{side}.urdf")
 
 
 if __name__ == "__main__":

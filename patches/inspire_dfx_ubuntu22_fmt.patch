@@ -1,0 +1,22 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 307706a..5e71424 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -18,6 +18,8 @@ if(POLICY CMP0167)
+ endif()
+ 
+ find_package(Boost COMPONENTS program_options REQUIRED)
++find_package(fmt REQUIRED)
++find_package(spdlog REQUIRED)
+ 
+ include_directories(
+   /usr/local/include/ddscxx
+@@ -25,7 +27,7 @@ include_directories(
+   include
+ )
+ 
+-link_libraries(unitree_sdk2 ddsc ddscxx rt pthread)
++link_libraries(unitree_sdk2 ddsc ddscxx rt pthread spdlog::spdlog fmt::fmt)
+ link_libraries(libboost_program_options.a)
+ 
+ add_executable(inspire_g1 inspire_g1.cpp)

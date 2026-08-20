@@ -99,6 +99,29 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("--right-ee=inspire_dfx", command)
         self.assertFalse(any(argument.startswith("--ee=") for argument in command))
 
+    def test_asymmetric_passive_left_brainco_right_builds_side_arguments(self):
+        device = validate_device({"input_mode": "hand", "left_ee": "rubber", "right_ee": "brainco"})
+        task = validate_task({
+            "name": "rubber_left_brainco_right",
+            "instruction": "Control the right BrainCo hand",
+            "description": "左橡胶手右强脑手",
+        })
+        command = build_command(device, task, Path("/tmp/datasets"))
+        self.assertIn("--left-ee=rubber", command)
+        self.assertIn("--right-ee=brainco", command)
+        self.assertFalse(any(argument.startswith("--ee=") for argument in command))
+
+    def test_passive_side_allows_every_active_end_effector(self):
+        for active_ee in ("dex1", "dex3", "inspire", "inspire_ftp", "inspire_dfx", "brainco"):
+            with self.subTest(active_ee=active_ee):
+                device = validate_device({
+                    "input_mode": "hand",
+                    "left_ee": "none",
+                    "right_ee": active_ee,
+                })
+                self.assertEqual(device["left_ee"], "none")
+                self.assertEqual(device["right_ee"], "inspire_ftp" if active_ee == "inspire" else active_ee)
+
     def test_asymmetric_two_active_end_effectors_is_rejected(self):
         with self.assertRaises(ValidationError):
             validate_device({"input_mode": "hand", "left_ee": "dex3", "right_ee": "inspire_dfx"})

@@ -16,6 +16,7 @@ from teleop.utils.daily_file_logger import DailyFileLogger
 DEFAULT_CONFIG: dict[str, Any] = {
     "web": {"host": "127.0.0.1", "port": 18089},
     "vision": {
+        "source": "browser",
         "camera": 0,
         "side": "right",
         "width": 960,
@@ -36,19 +37,41 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "calibration_samples": 24,
         "lost_timeout": 0.6,
         "joint_limits": [[0.0, 0.98], [0.0, 0.7], [0.0, 0.98], [0.0, 0.98], [0.0, 0.98], [0.0, 0.98]],
+        "devices": {
+            "brainco_revo2": {
+                "thumb_flex_aux_coupling": 0.9,
+                "joint_limits": [[0.0, 0.98], [0.0, 0.7], [0.0, 0.98], [0.0, 0.98], [0.0, 0.98], [0.0, 0.98]],
+            },
+            "inspire_dfx": {
+                "thumb_flex_aux_coupling": 0.7,
+                "joint_limits": [[0.0, 0.95], [0.0, 0.95], [0.0, 0.95], [0.0, 0.95], [0.0, 0.95], [0.0, 0.95]],
+            },
+            "inspire_ftp": {
+                "thumb_flex_aux_coupling": 0.7,
+                "joint_limits": [[0.0, 0.95], [0.0, 0.95], [0.0, 0.95], [0.0, 0.95], [0.0, 0.95], [0.0, 0.95]],
+            },
+        },
     },
-    "default_device": "brainco_revo2",
+    "default_device": "inspire_dfx",
     "devices": {
         "brainco_revo2": {
             "default_transport": "modbus",
             "modbus": {"port": "", "slave_id": 127, "side": "right"},
             "dds": {
-                "network_interface": "",
+                "network_interface": "enp86s0",
                 "domain": 0,
                 "sides": "both",
                 "publish_hz": 50,
             },
-        }
+        },
+        "inspire_dfx": {
+            "default_transport": "dds",
+            "dds": {"network_interface": "enp86s0", "domain": 0, "sides": "both"},
+        },
+        "inspire_ftp": {
+            "default_transport": "dds",
+            "dds": {"network_interface": "enp86s0", "domain": 0, "sides": "both"},
+        },
     },
 }
 
@@ -74,7 +97,11 @@ def load_config(path: Path) -> dict[str, Any]:
                         else:
                             current[device_key] = device_value
         elif key in {"web", "vision"} and isinstance(value, dict):
-            config[key].update(value)
+            for nested_key, nested_value in value.items():
+                if isinstance(nested_value, dict) and isinstance(config[key].get(nested_key), dict):
+                    config[key][nested_key].update(nested_value)
+                else:
+                    config[key][nested_key] = nested_value
         else:
             config[key] = value
     return config

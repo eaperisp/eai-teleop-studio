@@ -17,6 +17,9 @@ const state = {
   calibration: {},
   vision: { available: null, starting: false, running: false, stopping: false, dry_run: false },
   visionFrameLoading: false,
+  browserCameraStream: null,
+  browserFrameTimer: null,
+  browserFrameSending: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -108,6 +111,7 @@ function updateControlAvailability() {
     || state.vision.available === false || (!state.connected && !dryRun);
   $('stopVisionButton').disabled = !state.vision.running || state.vision.stopping;
   $('cameraInput').disabled = manualLocked;
+  $('visionSourceSelect').disabled = manualLocked;
   $('visionSideSelect').disabled = manualLocked;
   $('visionDryRun').disabled = manualLocked;
   $('calibrationButton').disabled = !state.vision.running || !state.vision.dry_run
@@ -116,6 +120,11 @@ function updateControlAvailability() {
     button.disabled = !state.vision.running || !state.vision.dry_run
       || Boolean(state.calibration.active_stage);
   });
+}
+
+function renderVisionSource() {
+  const serverSource = $('visionSourceSelect').value === 'server';
+  $('serverCameraField').hidden = !serverSource;
 }
 
 function selectDevice(deviceId) {
@@ -262,7 +271,7 @@ function updateJoint(index, percent) {
 function updateHandPreview() {
   if (!state.device) return;
   ensureSide(state.activeSide);
-  handPreview.setPose(state.activeSide, state.values[state.activeSide]);
+  handPreview.setPose(state.activeSide, state.values[state.activeSide], state.device.preview);
 }
 
 function renderPoseLibrary() {
@@ -419,7 +428,8 @@ function renderVisionStatus(status) {
   $('cameraFrameBadge').textContent = `${status.frames || 0} 帧`;
   $('cameraModeBadge').textContent = status.dry_run ? '仅识别' : '视觉控制';
   $('stopVisionButton').textContent = '停止视觉控制';
-  $('visionDetail').textContent = status.error || (status.starting ? '正在打开摄像头' : status.running ? (status.last_detection_at ? '已检测' : '等待手部') : '待机');
+  $('visionDetail').textContent = status.error || (status.starting ? '正在打开摄像头'
+    : status.running ? (status.last_detection_at ? '已检测' : status.source === 'browser' ? '等待浏览器画面' : '等待手部') : '待机');
   renderCalibration();
   if (status.running && Array.isArray(status.positions) && status.side) {
     ensureSide(status.side);
@@ -432,12 +442,81 @@ function renderVisionStatus(status) {
   if (wasRunning && !status.running && !status.dry_run) {
     state.initializedFromState.delete(status.side || state.activeSide);
   }
+  if (wasRunning && !status.running && status.source === 'browser') stopBrowserCamera();
   if (!active) {
     $('visionFrame').classList.remove('visible');
     $('cameraPlaceholder').textContent = status.error || (status.available === false ? '视觉依赖未安装' : '摄像头未启动');
     $('cameraPlaceholder').classList.remove('hidden');
   }
   updateControlAvailability();
+}
+
+function stopBrowserCamera() {
+  clearTimeout(state.browserFrameTimer);
+  state.browserFrameTimer = null;
+  state.browserFrameSending = false;
+  if (state.browserCameraStream) {
+    state.browserCameraStream.getTracks().forEach((track) => track.stop());
+    state.browserCameraStream = null;
+  }
+  $('browserCamera').srcObject = null;
+}
+
+async function openBrowserCamera() {
+  stopBrowserCamera();
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    throw new Error('浏览器摄像头需要 HTTPS，或通过 SSH 转发后访问 http://127.0.0.1:18089');
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      facingMode: 'user',
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+    },
+  });
+  const video = $('browserCamera');
+  state.browserCameraStream = stream;
+  video.srcObject = stream;
+  await video.play();
+}
+
+function browserFrameBlob() {
+  const video = $('browserCamera');
+  if (!video.videoWidth || !video.videoHeight) return Promise.resolve(null);
+  const scale = Math.min(1, 960 / video.videoWidth, 540 / video.videoHeight);
+  const canvas = $('browserCapture');
+  canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+  canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+  canvas.getContext('2d', { alpha: false }).drawImage(video, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.78));
+}
+
+async function sendBrowserFrame() {
+  if (!state.browserCameraStream || !state.vision.running || state.vision.source !== 'browser') return;
+  if (state.browserFrameSending) return;
+  state.browserFrameSending = true;
+  try {
+    const frame = await browserFrameBlob();
+    if (frame) {
+      const response = await fetch('/api/vision/frame', {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/jpeg' },
+        body: frame,
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || '浏览器摄像头帧上传失败');
+      }
+    }
+  } catch (error) {
+    $('visionDetail').textContent = error.message;
+  } finally {
+    state.browserFrameSending = false;
+    if (state.browserCameraStream && state.vision.running && state.vision.source === 'browser') {
+      state.browserFrameTimer = setTimeout(sendBrowserFrame, 80);
+    }
+  }
 }
 
 async function pollVisionStatus() {
@@ -460,14 +539,18 @@ async function startVision() {
   $('startVisionButton').disabled = true;
   try {
     const dryRun = $('visionDryRun').checked;
+    const source = $('visionSourceSelect').value;
+    if (source === 'browser') await openBrowserCamera();
     const status = await request('/api/vision/start', {
       device_id: state.device.id,
+      source,
       camera: Number($('cameraInput').value),
       side: $('visionSideSelect').value,
       dry_run: dryRun,
       control_enabled: !dryRun,
     });
     renderVisionStatus(status);
+    if (source === 'browser') sendBrowserFrame();
     log(status.dry_run ? '视觉识别已启动' : '视觉控制已启动', 'success');
   } catch (error) {
     if (error.message.includes('视觉控制已经在运行')) {
@@ -478,6 +561,7 @@ async function startVision() {
         return;
       }
     }
+    stopBrowserCamera();
     log(`视觉启动失败：${error.message}`, 'error');
     toast(error.message, 'error');
     await pollVisionStatus();
@@ -489,10 +573,12 @@ async function stopVision() {
   updateControlAvailability();
   try {
     const status = await request('/api/vision/stop', {});
+    stopBrowserCamera();
     renderVisionStatus(status);
     log(status.message || '视觉控制已停止', 'warning');
     await pollStatus();
   } catch (error) {
+    stopBrowserCamera();
     toast(error.message, 'error');
     await pollVisionStatus();
   }
@@ -765,6 +851,7 @@ $('calibrationDialog').addEventListener('click', (event) => {
   if (event.target === $('calibrationDialog')) closeCalibration();
 });
 $('visionDryRun').addEventListener('change', updateControlAvailability);
+$('visionSourceSelect').addEventListener('change', renderVisionSource);
 document.addEventListener('fullscreenchange', () => {
   const active = document.fullscreenElement === $('visionPanel');
   $('fullscreenVisionButton').classList.toggle('active', active);
@@ -793,7 +880,9 @@ document.addEventListener('keydown', (event) => {
   }
   if (event.key === 'Escape' && state.connected) stopMotion();
 });
+window.addEventListener('beforeunload', stopBrowserCamera);
 
+renderVisionSource();
 initialize();
 setInterval(pollStatus, 800);
 setInterval(pollVisionStatus, 500);

@@ -22,6 +22,20 @@ BRAINCO_JOINTS = (
     JointSpec("pinky", "小指", "Pinky"),
 )
 TRANSPORTS = ("modbus", "dds")
+BRAINCO_PREVIEW = {
+    "model_root": "/assets/brainco_hand",
+    "urdf": "brainco_{side}.urdf",
+    "side_prefix": {"left": "left", "right": "right"},
+    "material_mode": "brainco",
+    "joints": [
+        {"index": 0, "targets": [{"suffix": "thumb_proximal_joint", "lower": 0.0, "upper": 1.0472}]},
+        {"index": 1, "targets": [{"suffix": "thumb_metacarpal_joint", "lower": 0.0, "upper": 1.5184}]},
+        {"index": 2, "targets": [{"suffix": "index_proximal_joint", "lower": 0.0, "upper": 1.4661}]},
+        {"index": 3, "targets": [{"suffix": "middle_proximal_joint", "lower": 0.0, "upper": 1.4661}]},
+        {"index": 4, "targets": [{"suffix": "ring_proximal_joint", "lower": 0.0, "upper": 1.4661}]},
+        {"index": 5, "targets": [{"suffix": "pinky_proximal_joint", "lower": 0.0, "upper": 1.4661}]},
+    ],
+}
 
 
 @dataclass(frozen=True)
@@ -68,6 +82,7 @@ class BraincoHandSDK:
                 "closed": 1.0,
             },
             "joints": [joint.to_dict() for joint in BRAINCO_JOINTS],
+            "preview": BRAINCO_PREVIEW,
             "quick_actions": [
                 {"id": "open", "name": "张开", "name_en": "Open", "positions": [0.0] * HAND_DOF},
                 {"id": "half", "name": "半握", "name_en": "Half Grip", "positions": [0.45] * HAND_DOF},
@@ -170,6 +185,7 @@ class BraincoHandSDK:
 
 __all__ = [
     "BRAINCO_JOINTS",
+    "BRAINCO_PREVIEW",
     "HAND_DOF",
     "TRANSPORTS",
     "BraincoHandSDK",

@@ -40,10 +40,12 @@ class VisionManager:
         self._running = False
         self._stopping = False
         self._dry_run = False
+        self._source = "browser"
         self._side = "right"
         self._device_id: str | None = None
         self._started_at: float | None = None
         self._last_frame_at: float | None = None
+        self._last_input_at: float | None = None
         self._last_detection_at: float | None = None
         self._frame: bytes | None = None
         self._positions: list[float] | None = None
@@ -56,6 +58,7 @@ class VisionManager:
         self._command_count = 0
         self._available: bool | None = None
         self._mapper: Any = None
+        self._runtime: Any = None
         self._calibration_profile: dict[str, Any] | None = None
         self._calibration_stage: str | None = None
         self._calibration_samples: list[dict[str, float]] = []
@@ -76,8 +79,15 @@ class VisionManager:
 
     def _start(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = dict(self.service.config.get("vision", {}))
+        status = self.service.status()
+        device_id = str(payload.get("device_id") or status.get("device_id") or self.service.config.get("default_device"))
+        device_overrides = config.pop("devices", {})
+        if isinstance(device_overrides, dict):
+            selected_overrides = device_overrides.get(device_id, {})
+            if isinstance(selected_overrides, dict):
+                config.update(selected_overrides)
         for key in (
-            "camera", "side", "width", "height", "preview_fps", "min_detection_confidence",
+            "source", "camera", "side", "width", "height", "preview_fps", "min_detection_confidence",
             "min_tracking_confidence", "filter_min_cutoff", "filter_beta", "filter_derivative_cutoff",
             "max_velocity", "endpoint_snap", "deadband", "change_threshold", "min_interval",
             "duration_ms", "warmup_frames", "lost_timeout", "joint_limits", "calibration_samples",
@@ -87,6 +97,9 @@ class VisionManager:
         config["side"] = str(config.get("side", "right")).lower()
         if config["side"] not in {"left", "right"}:
             raise ValidationError("side 必须是 left 或 right")
+        config["source"] = str(config.get("source", "browser")).strip().lower()
+        if config["source"] not in {"browser", "server"}:
+            raise ValidationError("source 必须是 browser 或 server")
         try:
             config["camera"] = int(config.get("camera", 0))
             config["duration_ms"] = max(50, min(2000, int(config.get("duration_ms", 180))))
@@ -98,8 +111,6 @@ class VisionManager:
         dry_run = dry_run_value
         if not dry_run and payload.get("control_enabled") is not True:
             raise ValidationError("启动视觉控制需要明确确认 control_enabled=true")
-        status = self.service.status()
-        device_id = str(payload.get("device_id") or status.get("device_id") or self.service.config.get("default_device"))
         if not dry_run:
             if not status.get("connected"):
                 raise ValidationError("请先连接灵巧手，或启用仅识别模式")
@@ -122,10 +133,12 @@ class VisionManager:
             self._running = True
             self._stopping = False
             self._dry_run = dry_run
+            self._source = config["source"]
             self._side = config["side"]
             self._device_id = device_id
             self._started_at = time.time()
             self._last_frame_at = None
+            self._last_input_at = None
             self._last_detection_at = None
             self._frame = None
             self._positions = None
@@ -135,6 +148,7 @@ class VisionManager:
             self._error = ""
             self._frame_count = self._detection_count = self._command_count = 0
             self._mapper = mapper
+            self._runtime = runtime
             self._calibration_profile = profile
             self._calibration_target = max(12, min(90, int(config.get("calibration_samples", 24))))
             self._calibration_stage = None
@@ -149,7 +163,11 @@ class VisionManager:
             )
             self._thread.start()
             self._starting = False
-        self._log("info", "vision control started", device_id=device_id, side=self._side, dry_run=dry_run, camera=config["camera"])
+        self._log(
+            "info", "vision control started", device_id=device_id, side=self._side,
+            dry_run=dry_run, source=self._source,
+            camera=config["camera"] if self._source == "server" else None,
+        )
         return self.status()
 
     def stop(self) -> dict[str, Any]:
@@ -178,6 +196,7 @@ class VisionManager:
                 "running": self._running,
                 "stopping": self._stopping,
                 "dry_run": self._dry_run,
+                "source": self._source,
                 "side": self._side,
                 "device_id": self._device_id,
                 "started_at": self._started_at,
@@ -255,6 +274,15 @@ class VisionManager:
         with self._lock:
             return self._frame
 
+    def submit_frame(self, payload: bytes) -> dict[str, Any]:
+        with self._lock:
+            if not self._running or self._source != "browser" or self._runtime is None:
+                raise RuntimeError("浏览器视觉控制未运行")
+            runtime = self._runtime
+            self._last_input_at = time.time()
+        runtime.submit_frame(payload)
+        return {"ok": True}
+
     def close(self) -> None:
         try:
             self.stop()
@@ -272,6 +300,18 @@ class VisionManager:
             while not self._stop_event.is_set():
                 frame, detection = runtime.read()
                 now = time.monotonic()
+                if frame is None:
+                    with self._lock:
+                        last_input_at = self._last_input_at
+                    if (
+                        not self._dry_run and motion_sent and not loss_stopped
+                        and last_input_at is not None
+                        and time.time() - last_input_at >= float(config.get("lost_timeout", 0.6))
+                    ):
+                        self.service.stop("vision")
+                        loss_stopped = True
+                        last_sent = None
+                    continue
                 positions = None
                 if detection is not None:
                     detected_frames += 1
@@ -360,6 +400,7 @@ class VisionManager:
                     self._running = False
                     self._stopping = False
                     self._mapper = None
+                    self._runtime = None
                 self._log(
                     "info", "vision control stopped", frames=self._frame_count,
                     detections=self._detection_count, commands=self._command_count, error=self._error,

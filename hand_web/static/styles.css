@@ -16,6 +16,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
 body {
   margin: 0;
@@ -118,7 +119,7 @@ h1 { color: #f4fbff; font-size: 18px; line-height: 1.25; letter-spacing: 0; text
 }
 
 .sidebar-column { display: grid; gap: 14px; align-self: start; align-content: start; }
-.connection-panel { padding: 18px; align-self: start; }
+.connection-panel { min-width: 0; padding: 18px; align-self: start; }
 .control-column { min-width: 0; }
 .panel-title {
   min-height: 34px;
@@ -148,7 +149,7 @@ h1 { color: #f4fbff; font-size: 18px; line-height: 1.25; letter-spacing: 0; text
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--focus);
 }
-.transport-description { min-height: 32px; margin-top: 8px; color: #8fb8d9; font-size: 11px; line-height: 1.5; }
+.transport-description { min-height: 32px; margin-top: 8px; color: #8fb8d9; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 
 .button {
   min-height: 38px;

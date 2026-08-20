@@ -66,6 +66,19 @@ class FakeRuntime:
         self.closed = True
 
 
+class BrowserRuntime(FakeRuntime):
+    def __init__(self, config):
+        super().__init__(config)
+        self.frames = []
+
+    def read(self):
+        time.sleep(0.005)
+        return None, None
+
+    def submit_frame(self, payload):
+        self.frames.append(payload)
+
+
 class CalibrationMapper:
     def __init__(self):
         self.last_features = None
@@ -185,6 +198,17 @@ class VisionTests(unittest.TestCase):
             self.assertGreater(result["detections"], 0)
             self.assertEqual(result["commands"], 0)
             self.assertIsNone(self.service.status()["control_owner"])
+        finally:
+            manager.close()
+
+    def test_browser_frame_is_forwarded_to_running_runtime(self):
+        runtime = BrowserRuntime({})
+        manager = VisionManager(self.service, runtime_factory=lambda _config: runtime)
+        try:
+            status = manager.start({"source": "browser", "dry_run": True, "side": "right"})
+            self.assertEqual(status["source"], "browser")
+            self.assertEqual(manager.submit_frame(b"jpeg"), {"ok": True})
+            self.assertEqual(runtime.frames, [b"jpeg"])
         finally:
             manager.close()
 

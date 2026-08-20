@@ -88,6 +88,8 @@
           <div class="vision-layout">
             <div class="camera-stage">
               <img id="visionFrame" alt="手势识别摄像头画面">
+              <video id="browserCamera" playsinline muted hidden></video>
+              <canvas id="browserCapture" hidden></canvas>
               <div class="camera-placeholder" id="cameraPlaceholder">摄像头未启动</div>
               <div class="camera-hud" id="cameraHud">
                 <span id="cameraModeBadge">仅识别</span>
@@ -97,7 +99,14 @@
             <div class="vision-controls">
               <div class="vision-fields">
                 <label class="field compact-field">
-                  <span>摄像头</span>
+                  <span>视频来源</span>
+                  <select id="visionSourceSelect">
+                    <option value="browser">浏览器摄像头</option>
+                    <option value="server">服务器摄像头</option>
+                  </select>
+                </label>
+                <label class="field compact-field" id="serverCameraField" hidden>
+                  <span>服务器摄像头</span>
                   <input type="number" id="cameraInput" min="0" step="1" value="0">
                 </label>
                 <label class="field compact-field">

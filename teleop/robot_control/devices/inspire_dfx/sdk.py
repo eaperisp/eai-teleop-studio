@@ -102,10 +102,19 @@ class InspireDFXHandSDK:
         return InspireDFXHandState(side=side, angles=tuple(angles))
 
     def read_states(self, timeout: float = 0.02) -> dict[HandSide, InspireDFXHandState | None]:
-        result = {}
+        if not self._initialized:
+            self.initialize()
+        state = self._read_raw_state(timeout)
+        result: dict[HandSide, InspireDFXHandState | None] = {}
         for side in HAND_SIDES:
-            if self.enabled_sides[side]:
-                result[side] = self.read_state(side, timeout=timeout)
+            if not self.enabled_sides[side]:
+                continue
+            if state is None or len(state.states) < TOTAL_DOF:
+                result[side] = None
+                continue
+            offset = self._offset(side)
+            angles = tuple(float(state.states[offset + index].q) for index in range(HAND_DOF))
+            result[side] = InspireDFXHandState(side=side, angles=angles)  # type: ignore[arg-type]
         return result
 
     def command(self, side: HandSide, angles: Iterable[int | float]) -> list[float]:

@@ -1,4 +1,4 @@
-"""Constraint-aware retargeting from human hand features to Revo2 joints."""
+"""Constraint-aware retargeting from human features to a semantic six-joint hand."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ DEFAULT_RANGES = {
 }
 
 
-class BraincoRevo2Retargeter:
+class SixJointHandRetargeter:
     def __init__(self, config: dict[str, Any], profile: dict[str, Any] | None = None) -> None:
         limits = config.get("joint_limits") or [[0.0, 1.0]] * 6
         if not isinstance(limits, list) or len(limits) != 6:
@@ -65,8 +65,8 @@ class BraincoRevo2Retargeter:
         features = self.extractor.extract(landmarks)
         self.last_features = features
         raw = [self._normalize(name, getattr(features, name)) for name in FEATURE_NAMES]
-        # Revo2 needs both active thumb joints when a human thumb moves inward
-        # against the palm, even if the visible IP segment is straight.
+        # Coupled robot thumbs need both active axes when the human thumb moves
+        # inward against the palm, even if the visible IP segment is straight.
         raw[0] = max(raw[0], raw[1] * self.thumb_flex_aux_coupling)
         if gesture == "Open Hand":
             # MediaPipe's label describes the four long fingers. The thumb can
@@ -110,4 +110,7 @@ class BraincoRevo2Retargeter:
         self.last_unfiltered = None
 
 
-__all__ = ["BraincoRevo2Retargeter", "DEFAULT_RANGES"]
+BraincoRevo2Retargeter = SixJointHandRetargeter
+
+
+__all__ = ["BraincoRevo2Retargeter", "DEFAULT_RANGES", "SixJointHandRetargeter"]

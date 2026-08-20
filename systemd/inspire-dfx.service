@@ -1,0 +1,27 @@
+[Unit]
+Description=Inspire DFX Serial to DDS Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robot
+Group=robot
+WorkingDirectory=@PROJECT_ROOT@
+Environment=HOME=/home/robot
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONNOUSERSITE=1
+Environment=DDS_IFACE=enp86s0
+Environment=PATH=/home/robot/miniconda3/envs/teleop/bin:/home/robot/miniconda3/condabin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-@PROJECT_ROOT@/config/inspire_dfx.env
+ExecStart=/home/robot/miniconda3/envs/teleop/bin/python3 @PROJECT_ROOT@/tools/start_inspire_dfx_service.py --no-sudo
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+KillSignal=SIGINT
+
+StandardOutput=append:@PROJECT_ROOT@/logs/app/inspire-dfx.service.log
+StandardError=append:@PROJECT_ROOT@/logs/app/inspire-dfx.service.log
+
+[Install]
+WantedBy=multi-user.target

@@ -31,9 +31,15 @@ kTopicDex3LeftState = "rt/dex3/left/state"
 kTopicDex3RightState = "rt/dex3/right/state"
 
 
+def _require_enabled_side(enable_left, enable_right):
+    if not enable_left and not enable_right:
+        raise ValueError("At least one end-effector side must be enabled.")
+
+
 class Dex3_1_Controller:
     def __init__(self, left_hand_array_in, right_hand_array_in, dual_hand_data_lock = None, dual_hand_state_array_out = None,
-                       dual_hand_action_array_out = None, fps = 100.0, Unit_Test = False, simulation_mode = False, xr_motion_data_ready_in = None):
+                       dual_hand_action_array_out = None, fps = 100.0, Unit_Test = False, simulation_mode = False, xr_motion_data_ready_in = None,
+                       enable_left = True, enable_right = True):
         """
         [note] A *_array type parameter requires using a multiprocessing Array, because it needs to be passed to the internal child process
 
@@ -58,25 +64,31 @@ class Dex3_1_Controller:
         self.fps = fps
         self.Unit_Test = Unit_Test
         self.simulation_mode = simulation_mode
+        self.enable_left = bool(enable_left)
+        self.enable_right = bool(enable_right)
+        _require_enabled_side(self.enable_left, self.enable_right)
         if not self.Unit_Test:
             self.hand_retargeting = HandRetargeting(HandType.UNITREE_DEX3)
         else:
             self.hand_retargeting = HandRetargeting(HandType.UNITREE_DEX3_Unit_Test)
 
         # initialize handcmd publisher and handstate subscriber
-        self.LeftHandCmb_publisher = ChannelPublisher(kTopicDex3LeftCommand, HandCmd_)
-        self.LeftHandCmb_publisher.Init()
-        self.RightHandCmb_publisher = ChannelPublisher(kTopicDex3RightCommand, HandCmd_)
-        self.RightHandCmb_publisher.Init()
-
-        self.LeftHandState_subscriber = ChannelSubscriber(kTopicDex3LeftState, HandState_)
-        self.LeftHandState_subscriber.Init()
-        self.RightHandState_subscriber = ChannelSubscriber(kTopicDex3RightState, HandState_)
-        self.RightHandState_subscriber.Init()
+        if self.enable_left:
+            self.LeftHandCmb_publisher = ChannelPublisher(kTopicDex3LeftCommand, HandCmd_)
+            self.LeftHandCmb_publisher.Init()
+            self.LeftHandState_subscriber = ChannelSubscriber(kTopicDex3LeftState, HandState_)
+            self.LeftHandState_subscriber.Init()
+        if self.enable_right:
+            self.RightHandCmb_publisher = ChannelPublisher(kTopicDex3RightCommand, HandCmd_)
+            self.RightHandCmb_publisher.Init()
+            self.RightHandState_subscriber = ChannelSubscriber(kTopicDex3RightState, HandState_)
+            self.RightHandState_subscriber.Init()
 
         # Shared Arrays for hand states
         self.left_hand_state_array  = Array('d', Dex3_Num_Motors, lock=True)  
         self.right_hand_state_array = Array('d', Dex3_Num_Motors, lock=True)
+        self.left_hand_state_received = False
+        self.right_hand_state_received = False
 
         # initialize subscribe thread
         self.subscribe_state_thread = threading.Thread(target=self._subscribe_hand_state)
@@ -84,7 +96,9 @@ class Dex3_1_Controller:
         self.subscribe_state_thread.start()
 
         while True:
-            if any(self.left_hand_state_array) and any(self.right_hand_state_array):
+            left_ready = not self.enable_left or self.left_hand_state_received
+            right_ready = not self.enable_right or self.right_hand_state_received
+            if left_ready and right_ready:
                 break
             time.sleep(0.01)
             logger_mp.warning("[Dex3_1_Controller] Waiting to subscribe dds...")
@@ -99,15 +113,16 @@ class Dex3_1_Controller:
 
     def _subscribe_hand_state(self):
         while True:
-            left_hand_msg  = self.LeftHandState_subscriber.Read()
-            right_hand_msg = self.RightHandState_subscriber.Read()
-            if left_hand_msg is not None and right_hand_msg is not None:
-                # Update left hand state
+            left_hand_msg = self.LeftHandState_subscriber.Read() if self.enable_left else None
+            right_hand_msg = self.RightHandState_subscriber.Read() if self.enable_right else None
+            if left_hand_msg is not None:
                 for idx, id in enumerate(Dex3_1_Left_JointIndex):
                     self.left_hand_state_array[idx] = left_hand_msg.motor_state[id].q
-                # Update right hand state
+                self.left_hand_state_received = True
+            if right_hand_msg is not None:
                 for idx, id in enumerate(Dex3_1_Right_JointIndex):
                     self.right_hand_state_array[idx] = right_hand_msg.motor_state[id].q
+                self.right_hand_state_received = True
             time.sleep(0.002)
     
     class _RIS_Mode:
@@ -125,13 +140,14 @@ class Dex3_1_Controller:
 
     def ctrl_dual_hand(self, left_q_target, right_q_target):
         """set current left, right hand motor state target q"""
-        for idx, id in enumerate(Dex3_1_Left_JointIndex):
-            self.left_msg.motor_cmd[id].q = left_q_target[idx]
-        for idx, id in enumerate(Dex3_1_Right_JointIndex):
-            self.right_msg.motor_cmd[id].q = right_q_target[idx]
-
-        self.LeftHandCmb_publisher.Write(self.left_msg)
-        self.RightHandCmb_publisher.Write(self.right_msg)
+        if self.enable_left:
+            for idx, id in enumerate(Dex3_1_Left_JointIndex):
+                self.left_msg.motor_cmd[id].q = left_q_target[idx]
+            self.LeftHandCmb_publisher.Write(self.left_msg)
+        if self.enable_right:
+            for idx, id in enumerate(Dex3_1_Right_JointIndex):
+                self.right_msg.motor_cmd[id].q = right_q_target[idx]
+            self.RightHandCmb_publisher.Write(self.right_msg)
         # logger_mp.debug("hand ctrl publish ok.")
     
     def control_process(self, left_hand_array_in, right_hand_array_in, left_hand_state_array, right_hand_state_array,
@@ -189,11 +205,12 @@ class Dex3_1_Controller:
                 state_data = np.concatenate((np.array(left_hand_state_array[:]), np.array(right_hand_state_array[:])))
 
                 if xr_motion_data_ready:
-                    ref_left_value = left_hand_data[self.hand_retargeting.left_indices[1,:]] - left_hand_data[self.hand_retargeting.left_indices[0,:]]
-                    ref_right_value = right_hand_data[self.hand_retargeting.right_indices[1,:]] - right_hand_data[self.hand_retargeting.right_indices[0,:]]
-
-                    left_q_target  = self.hand_retargeting.left_retargeting.retarget(ref_left_value)[self.hand_retargeting.left_dex_retargeting_to_hardware]
-                    right_q_target = self.hand_retargeting.right_retargeting.retarget(ref_right_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
+                    if self.enable_left:
+                        ref_left_value = left_hand_data[self.hand_retargeting.left_indices[1,:]] - left_hand_data[self.hand_retargeting.left_indices[0,:]]
+                        left_q_target = self.hand_retargeting.left_retargeting.retarget(ref_left_value)[self.hand_retargeting.left_dex_retargeting_to_hardware]
+                    if self.enable_right:
+                        ref_right_value = right_hand_data[self.hand_retargeting.right_indices[1,:]] - right_hand_data[self.hand_retargeting.right_indices[0,:]]
+                        right_q_target = self.hand_retargeting.right_retargeting.retarget(ref_right_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
 
                 # get dual hand action
                 action_data = np.concatenate((left_q_target, right_q_target))    
@@ -236,7 +253,8 @@ kTopicGripperRightState = "rt/dex1/right/state"
 
 class Dex1_1_Gripper_Controller:
     def __init__(self, left_gripper_value_in, right_gripper_value_in, dual_gripper_data_lock = None, dual_gripper_state_out = None, dual_gripper_action_out = None, 
-                       filter = True, fps = 200.0, Unit_Test = False, simulation_mode = False, xr_motion_data_ready_in = None):
+                       filter = True, fps = 200.0, Unit_Test = False, simulation_mode = False, xr_motion_data_ready_in = None,
+                       enable_left = True, enable_right = True):
         """
         [note] A *_array type parameter requires using a multiprocessing Array, because it needs to be passed to the internal child process
 
@@ -263,6 +281,11 @@ class Dex1_1_Gripper_Controller:
         self.Unit_Test = Unit_Test
         self.gripper_sub_ready = False
         self.simulation_mode = simulation_mode
+        self.enable_left = bool(enable_left)
+        self.enable_right = bool(enable_right)
+        _require_enabled_side(self.enable_left, self.enable_right)
+        self.left_gripper_state_received = False
+        self.right_gripper_state_received = False
         
         if filter and not self.simulation_mode:
             self.smooth_filter = WeightedMovingFilter(np.array([0.5, 0.3, 0.2]), 2)
@@ -270,15 +293,16 @@ class Dex1_1_Gripper_Controller:
             self.smooth_filter = None
  
         # initialize handcmd publisher and handstate subscriber
-        self.LeftGripperCmb_publisher = ChannelPublisher(kTopicGripperLeftCommand, MotorCmds_)
-        self.LeftGripperCmb_publisher.Init()
-        self.RightGripperCmb_publisher = ChannelPublisher(kTopicGripperRightCommand, MotorCmds_)
-        self.RightGripperCmb_publisher.Init()
-
-        self.LeftGripperState_subscriber = ChannelSubscriber(kTopicGripperLeftState, MotorStates_)
-        self.LeftGripperState_subscriber.Init()
-        self.RightGripperState_subscriber = ChannelSubscriber(kTopicGripperRightState, MotorStates_)
-        self.RightGripperState_subscriber.Init()
+        if self.enable_left:
+            self.LeftGripperCmb_publisher = ChannelPublisher(kTopicGripperLeftCommand, MotorCmds_)
+            self.LeftGripperCmb_publisher.Init()
+            self.LeftGripperState_subscriber = ChannelSubscriber(kTopicGripperLeftState, MotorStates_)
+            self.LeftGripperState_subscriber.Init()
+        if self.enable_right:
+            self.RightGripperCmb_publisher = ChannelPublisher(kTopicGripperRightCommand, MotorCmds_)
+            self.RightGripperCmb_publisher.Init()
+            self.RightGripperState_subscriber = ChannelSubscriber(kTopicGripperRightState, MotorStates_)
+            self.RightGripperState_subscriber.Init()
 
         # Shared Arrays for gripper states
         self.left_gripper_state_value = Value('d', 0.0, lock=True)
@@ -303,21 +327,28 @@ class Dex1_1_Gripper_Controller:
 
     def _subscribe_gripper_state(self):
         while True:
-            left_gripper_msg  = self.LeftGripperState_subscriber.Read()
-            right_gripper_msg  = self.RightGripperState_subscriber.Read()
-            if left_gripper_msg is not None and right_gripper_msg is not None:
+            left_gripper_msg = self.LeftGripperState_subscriber.Read() if self.enable_left else None
+            right_gripper_msg = self.RightGripperState_subscriber.Read() if self.enable_right else None
+            if left_gripper_msg is not None:
                 self.left_gripper_state_value.value = left_gripper_msg.states[0].q
+                self.left_gripper_state_received = True
+            if right_gripper_msg is not None:
                 self.right_gripper_state_value.value = right_gripper_msg.states[0].q
-                self.gripper_sub_ready = True
+                self.right_gripper_state_received = True
+            self.gripper_sub_ready = (
+                (not self.enable_left or self.left_gripper_state_received)
+                and (not self.enable_right or self.right_gripper_state_received)
+            )
             time.sleep(0.002)
     
     def ctrl_dual_gripper(self, dual_gripper_action):
         """set current left, right gripper motor cmd target q"""
-        self.left_gripper_msg.cmds[0].q  = dual_gripper_action[0]
-        self.right_gripper_msg.cmds[0].q = dual_gripper_action[1]
-
-        self.LeftGripperCmb_publisher.Write(self.left_gripper_msg)
-        self.RightGripperCmb_publisher.Write(self.right_gripper_msg)
+        if self.enable_left:
+            self.left_gripper_msg.cmds[0].q = dual_gripper_action[0]
+            self.LeftGripperCmb_publisher.Write(self.left_gripper_msg)
+        if self.enable_right:
+            self.right_gripper_msg.cmds[0].q = dual_gripper_action[1]
+            self.RightGripperCmb_publisher.Write(self.right_gripper_msg)
         # logger_mp.debug("gripper ctrl publish ok.")
     
     def control_thread(self, left_gripper_value_in, right_gripper_value_in, left_gripper_state_value, right_gripper_state_value, dual_hand_data_lock = None, 

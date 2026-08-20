@@ -5,11 +5,14 @@ from __future__ import annotations
 from typing import Type
 
 from hand_web.adapters.brainco import BraincoAdapter
+from hand_web.adapters.inspire import InspireDFXAdapter, InspireFTPAdapter
 from hand_web.core.models import HandAdapter
 
 
 ADAPTERS: dict[str, Type[HandAdapter]] = {
     "brainco_revo2": BraincoAdapter,
+    "inspire_dfx": InspireDFXAdapter,
+    "inspire_ftp": InspireFTPAdapter,
 }
 
 

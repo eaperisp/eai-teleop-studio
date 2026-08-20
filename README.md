@@ -43,7 +43,7 @@ tools/        数据转换、OpenPI、设备辅助工具
 ```bash
 sudo apt update
 sudo apt install -y \
-  git curl wget rsync build-essential python3-dev \
+  git curl wget rsync build-essential python3-dev cmake \
   ffmpeg libusb-1.0-0-dev libturbojpeg0-dev v4l-utils openssl \
   netcat-openbsd
 ```
@@ -124,6 +124,51 @@ print("numpy", numpy.__version__)
 print("imports ok")
 PY
 ```
+安装 inspire:
+```bash
+sudo apt update
+sudo apt install cmake -y \
+  build-essential g++ \
+  libboost-all-dev \
+  libspdlog-dev \
+  libyaml-cpp-dev \
+  libeigen3-dev \
+  libfmt-dev
+```
+安装 C++ 版 unitree_sdk2（DFX 服务的编译依赖）:
+```bash
+cd /home/robot
+
+git clone https://github.com/unitreerobotics/unitree_sdk2.git
+
+cmake -S unitree_sdk2 \
+  -B unitree_sdk2/build \
+  -DCMAKE_BUILD_TYPE=Release
+
+cmake --build unitree_sdk2/build -j6
+
+sudo cmake --install unitree_sdk2/build
+sudo ldconfig
+```
+
+```bash
+cd /home/robot
+git clone https://github.com/unitreerobotics/DFX_inspire_service.git
+
+PROJECT_ROOT=/home/robot/eai-teleop-studio
+if ! grep -q 'find_package(fmt REQUIRED)' DFX_inspire_service/CMakeLists.txt; then
+  git -C DFX_inspire_service apply \
+    "$PROJECT_ROOT/patches/inspire_dfx_ubuntu22_fmt.patch"
+fi
+
+cmake -S DFX_inspire_service \
+  -B DFX_inspire_service/build \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build DFX_inspire_service/build --target inspire_h1 -j"$(nproc)"
+test -x /home/robot/DFX_inspire_service/build/inspire_h1
+```
+
+
 
 ### 数据转换服务 lerobot
 
@@ -448,8 +493,12 @@ sudo bash scripts/install_autostart_services.sh xr-teleop-web.service h2-switch-
 只安装灵巧手调试服务：
 
 ```bash
+sudo usermod -aG dialout robot
 sudo bash scripts/install_autostart_services.sh hand-web.service
+sudo systemctl restart hand-web.service
 ```
+
+灵巧手服务还要求官方 `bc-stark-sdk` 安装在 `/home/robot/miniconda3/envs/teleop` 环境。视觉控制默认使用访问页面电脑的浏览器摄像头；远程 HTTP 下可通过 SSH 端口转发访问本机地址。Linux 串口权限、FT2232 双通道识别、Revo2 端口确认、视觉访问、首次部署和更新部署的完整步骤见 [`hand_web/README_zh-CN.md`](hand_web/README_zh-CN.md)。
 
 查看状态：
 

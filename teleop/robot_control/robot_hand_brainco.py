@@ -34,14 +34,34 @@ def _update_shared_hand_states(states, left_hand_state_array, right_hand_state_a
             shared_array[:] = state.positions
 
 
+def _enabled_sides(enable_left, enable_right):
+    if enable_left and enable_right:
+        return "both"
+    if enable_left:
+        return "left"
+    if enable_right:
+        return "right"
+    raise ValueError("At least one BrainCo hand must be enabled.")
+
+
+def _command_enabled_hands(hand_sdk, left_q_target, right_q_target, enable_left, enable_right):
+    hand_sdk.command_both(
+        left_q_target if enable_left else None,
+        right_q_target if enable_right else None,
+    )
+
+
 class Brainco_Controller_ctrl:
     def __init__(self, left_gripper_trigger_in, left_gripper_squeeze_in, right_gripper_trigger_in, right_gripper_squeeze_in, 
                        dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False,
-                       xr_motion_data_ready_in = None):
+                       xr_motion_data_ready_in = None, enable_left = True, enable_right = True):
         logger_mp.info("Initialize Brainco_Controller_ctrl...")
         self.fps = fps
         self.Unit_Test = Unit_Test
         self.simulation_mode = simulation_mode
+        self.enable_left = bool(enable_left)
+        self.enable_right = bool(enable_right)
+        _enabled_sides(self.enable_left, self.enable_right)
 
         if not self.Unit_Test:
             self.hand_retargeting = HandRetargeting(HandType.BRAINCO_HAND)
@@ -54,7 +74,7 @@ class Brainco_Controller_ctrl:
 
         hand_control_process = Process(target=self.control_process, args=(left_gripper_trigger_in, left_gripper_squeeze_in, right_gripper_trigger_in, right_gripper_squeeze_in, 
                                                                           self.left_hand_state_array, self.right_hand_state_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array,
-                                                                          xr_motion_data_ready_in))
+                                                                          xr_motion_data_ready_in, self.enable_left, self.enable_right))
         hand_control_process.daemon = True
         hand_control_process.start()
 
@@ -64,19 +84,24 @@ class Brainco_Controller_ctrl:
         """
         Set current left, right hand motor state target q
         """
-        self.hand_sdk.command_both(left_q_target, right_q_target)
+        _command_enabled_hands(
+            self.hand_sdk, left_q_target, right_q_target,
+            self.enable_left, self.enable_right,
+        )
     
     def control_process(self, left_gripper_trigger_in, left_gripper_squeeze_in, right_gripper_trigger_in, right_gripper_squeeze_in,
                               left_hand_state_array, right_hand_state_array, dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None,
-                              xr_motion_data_ready_in = None):
+                              xr_motion_data_ready_in = None, enable_left = True, enable_right = True):
         self.running = True
+        self.enable_left = bool(enable_left)
+        self.enable_right = bool(enable_right)
 
         left_q_target  = np.full(brainco_Num_Motors, 0.0, dtype=float)
         right_q_target = np.full(brainco_Num_Motors, 0.0, dtype=float)
 
         self.hand_sdk = BraincoHandSDK(
             "dds",
-            sides="both",
+            sides=_enabled_sides(self.enable_left, self.enable_right),
             initialize_factory=False,
             continuous_publish=False,
         )
@@ -142,11 +167,15 @@ class Brainco_Controller_ctrl:
 
 class Brainco_Controller_hand:
     def __init__(self, left_hand_array, right_hand_array, dual_hand_data_lock = None, dual_hand_state_array = None,
-                       dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False, xr_motion_data_ready_in = None):
+                       dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False, xr_motion_data_ready_in = None,
+                       enable_left = True, enable_right = True):
         logger_mp.info("Initialize Brainco_Controller_hand...")
         self.fps = fps
         self.Unit_Test = Unit_Test
         self.simulation_mode = simulation_mode
+        self.enable_left = bool(enable_left)
+        self.enable_right = bool(enable_right)
+        _enabled_sides(self.enable_left, self.enable_right)
 
         if not self.Unit_Test:
             self.hand_retargeting = HandRetargeting(HandType.BRAINCO_HAND)
@@ -159,7 +188,8 @@ class Brainco_Controller_hand:
         self.right_hand_state_array = Array('d', brainco_Num_Motors, lock=True)
 
         hand_control_process = Process(target=self.control_process, args=(left_hand_array, right_hand_array,  self.left_hand_state_array, self.right_hand_state_array,
-                                                                          dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, xr_motion_data_ready_in))
+                                                                          dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, xr_motion_data_ready_in,
+                                                                          self.enable_left, self.enable_right))
         hand_control_process.daemon = True
         hand_control_process.start()
 
@@ -169,18 +199,24 @@ class Brainco_Controller_hand:
         """
         Set current left, right hand motor state target q
         """
-        self.hand_sdk.command_both(left_q_target, right_q_target)
+        _command_enabled_hands(
+            self.hand_sdk, left_q_target, right_q_target,
+            self.enable_left, self.enable_right,
+        )
     
     def control_process(self, left_hand_array, right_hand_array, left_hand_state_array, right_hand_state_array,
-                              dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None, xr_motion_data_ready_in = None):
+                              dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None, xr_motion_data_ready_in = None,
+                              enable_left = True, enable_right = True):
         self.running = True
+        self.enable_left = bool(enable_left)
+        self.enable_right = bool(enable_right)
 
         left_q_target  = np.full(brainco_Num_Motors, 0.0, dtype=float)
         right_q_target = np.full(brainco_Num_Motors, 0.0, dtype=float)
 
         self.hand_sdk = BraincoHandSDK(
             "dds",
-            sides="both",
+            sides=_enabled_sides(self.enable_left, self.enable_right),
             initialize_factory=False,
             continuous_publish=False,
         )

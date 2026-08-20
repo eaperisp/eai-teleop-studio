@@ -86,7 +86,11 @@ def resolve_serial(args: argparse.Namespace) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Start DFX Inspire hand serial-to-DDS service.")
-    parser.add_argument("--service", default=str(DEFAULT_SERVICE), help="Path to inspire_h1 service binary.")
+    parser.add_argument(
+        "--service",
+        default=os.getenv("INSPIRE_DFX_SERVICE", str(DEFAULT_SERVICE)),
+        help="Path to inspire_h1 service binary.",
+    )
     parser.add_argument("--serial", default=None, help="Stable serial path, preferably /dev/serial/by-id/...")
     parser.add_argument("--serial-match", default=None, help="Substring used to filter serial candidates.")
     parser.add_argument("--network", default=os.getenv("DDS_IFACE"), required=os.getenv("DDS_IFACE") is None)
