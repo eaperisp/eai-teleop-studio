@@ -15,6 +15,28 @@ from teleop.utils.daily_file_logger import DailyFileLogger
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "web": {"host": "127.0.0.1", "port": 18089},
+    "vision": {
+        "camera": 0,
+        "side": "right",
+        "width": 960,
+        "height": 540,
+        "preview_fps": 10,
+        "min_detection_confidence": 0.65,
+        "min_tracking_confidence": 0.65,
+        "filter_min_cutoff": 1.2,
+        "filter_beta": 0.08,
+        "filter_derivative_cutoff": 1.0,
+        "max_velocity": 3.0,
+        "endpoint_snap": 0.025,
+        "deadband": 0.005,
+        "change_threshold": 0.01,
+        "min_interval": 0.12,
+        "duration_ms": 180,
+        "warmup_frames": 5,
+        "calibration_samples": 24,
+        "lost_timeout": 0.6,
+        "joint_limits": [[0.0, 0.98], [0.0, 0.7], [0.0, 0.98], [0.0, 0.98], [0.0, 0.98], [0.0, 0.98]],
+    },
     "default_device": "brainco_revo2",
     "devices": {
         "brainco_revo2": {
@@ -51,8 +73,8 @@ def load_config(path: Path) -> dict[str, Any]:
                             current[device_key].update(device_value)
                         else:
                             current[device_key] = device_value
-        elif key == "web" and isinstance(value, dict):
-            config["web"].update(value)
+        elif key in {"web", "vision"} and isinstance(value, dict):
+            config[key].update(value)
         else:
             config[key] = value
     return config
@@ -68,6 +90,7 @@ class HandControlService:
         self._device_id: str | None = None
         self._transport: str | None = None
         self._connected_at: float | None = None
+        self._control_owner: str | None = None
         self._last_continuous_log_at = 0.0
         self._log("info", "hand control service initialized", config_file=str(config_path))
 
@@ -108,6 +131,8 @@ class HandControlService:
         adapter_type = adapter_class(device_id)
         adapter = adapter_type()
         with self._lock:
+            if self._control_owner is not None:
+                raise RuntimeError(f"{self._owner_label(self._control_owner)}正在控制灵巧手，请先停止该控制源")
             if self._adapter is not None:
                 self._adapter.disconnect()
             self._adapter = None
@@ -144,6 +169,8 @@ class HandControlService:
 
     def disconnect(self) -> dict[str, Any]:
         with self._lock:
+            if self._control_owner is not None:
+                raise RuntimeError(f"{self._owner_label(self._control_owner)}正在控制灵巧手，请先停止该控制源")
             if self._adapter is None:
                 return {"ok": True, "message": "当前没有已连接设备"}
             device_id = self._device_id
@@ -166,6 +193,7 @@ class HandControlService:
                     "transport": None,
                     "hands": {},
                     "error": "",
+                    "control_owner": self._control_owner,
                 }
             status = self._adapter.status()
             return {
@@ -173,9 +201,25 @@ class HandControlService:
                 "device_id": self._device_id,
                 "transport": self._transport,
                 "connected_at": self._connected_at,
+                "control_owner": self._control_owner,
             }
 
+    def acquire_control(self, owner: str) -> None:
+        owner = self._text(owner, "owner")
+        with self._lock:
+            if self._control_owner not in (None, owner):
+                raise RuntimeError(f"{self._owner_label(self._control_owner)}正在控制灵巧手")
+            self._control_owner = owner
+            self._log("info", "hand control acquired", owner=owner)
+
+    def release_control(self, owner: str) -> None:
+        with self._lock:
+            if self._control_owner == owner:
+                self._control_owner = None
+                self._log("info", "hand control released", owner=owner)
+
     def command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        source = self._text(payload.get("source") or "manual", "source")
         side = self._text(payload.get("side"), "side")
         positions = payload.get("positions")
         if not isinstance(positions, list):
@@ -186,6 +230,8 @@ class HandControlService:
             raise ValidationError("duration_ms 必须是整数") from exc
         continuous = payload.get("continuous") is True
         with self._lock:
+            if self._control_owner not in (None, source):
+                raise RuntimeError(f"{self._owner_label(self._control_owner)}正在控制灵巧手，请先停止后再手动操作")
             if self._adapter is None:
                 raise ValidationError("请先连接灵巧手")
             result = self._adapter.command(side, positions, duration_ms)
@@ -199,13 +245,16 @@ class HandControlService:
                     side=side,
                     positions=positions,
                     duration_ms=duration_ms,
+                    source=source,
                 )
                 if continuous:
                     self._last_continuous_log_at = now
             return result
 
-    def stop(self) -> dict[str, Any]:
+    def stop(self, source: str = "manual") -> dict[str, Any]:
         with self._lock:
+            if self._control_owner not in (None, source):
+                raise RuntimeError(f"{self._owner_label(self._control_owner)}正在控制灵巧手，请先停止该控制源")
             if self._adapter is None:
                 raise ValidationError("请先连接灵巧手")
             result = self._adapter.stop()
@@ -214,6 +263,7 @@ class HandControlService:
                 "hand stop sent",
                 device_id=self._device_id,
                 transport=self._transport,
+                source=source,
             )
             return result
 
@@ -228,6 +278,10 @@ class HandControlService:
         if not isinstance(value, str) or not value.strip():
             raise ValidationError(f"{field} 不能为空")
         return value.strip()
+
+    @staticmethod
+    def _owner_label(owner: str) -> str:
+        return {"vision": "视觉控制", "manual": "手动控制"}.get(owner, owner)
 
     def _log(self, level: str, message: str, **fields: Any) -> None:
         if self.logger is not None:

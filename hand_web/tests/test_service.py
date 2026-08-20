@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hand_web.core.service import HandControlService
+from hand_web.server import SingleInstanceLock, validate_hand_web_port
 from teleop.robot_control.devices.base import normalize_positions
 from teleop.robot_control.devices.brainco import BraincoHandSDK
 from teleop.robot_control.devices.brainco.dds_transport import BraincoDDSTransport
@@ -138,6 +139,24 @@ class HandControlServiceTests(unittest.TestCase):
         self.assertIn("hand command sent", content)
         self.assertEqual(content.count("hand continuous command sampled"), 1)
         self.assertIn("hand disconnected", content)
+
+    def test_single_instance_lock_blocks_a_second_http_port(self):
+        lock_path = Path(self.temp_dir.name) / "hand-web.lock"
+        first = SingleInstanceLock(lock_path)
+        second = SingleInstanceLock(lock_path)
+        first.acquire()
+        try:
+            with self.assertRaises(RuntimeError):
+                second.acquire()
+        finally:
+            first.release()
+        second.acquire()
+        second.release()
+
+    def test_hand_web_port_does_not_overlap_robot_sync(self):
+        self.assertEqual(validate_hand_web_port(18089), 18089)
+        with self.assertRaisesRegex(ValueError, "数据同步服务"):
+            validate_hand_web_port(18090)
 
 
 class BraincoModelTests(unittest.TestCase):

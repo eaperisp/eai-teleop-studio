@@ -32,29 +32,39 @@
     </div>
 
     <main class="workspace">
-      <aside class="connection-panel panel">
-        <div class="panel-title">
-          <div><span class="section-index">01</span><h2>设备连接</h2></div>
-        </div>
+      <div class="sidebar-column">
+        <aside class="connection-panel panel">
+          <div class="panel-title">
+            <div><span class="section-index">01</span><h2>设备连接</h2></div>
+          </div>
 
-        <label class="field">
-          <span>设备型号</span>
-          <select id="deviceSelect"></select>
-        </label>
-        <label class="field">
-          <span>通信方式</span>
-          <select id="transportSelect"></select>
-        </label>
-        <p class="transport-description" id="transportDescription"></p>
-        <div id="connectionFields"></div>
-        <button class="button primary full" id="connectButton">连接设备</button>
+          <label class="field">
+            <span>设备型号</span>
+            <select id="deviceSelect"></select>
+          </label>
+          <label class="field">
+            <span>通信方式</span>
+            <select id="transportSelect"></select>
+          </label>
+          <p class="transport-description" id="transportDescription"></p>
+          <div id="connectionFields"></div>
+          <button class="button primary full" id="connectButton">连接设备</button>
 
-        <div class="connection-facts" id="connectionFacts">
-          <div><span>设备</span><strong>--</strong></div>
-          <div><span>链路</span><strong>--</strong></div>
-          <div><span>反馈</span><strong>--</strong></div>
-        </div>
-      </aside>
+          <div class="connection-facts" id="connectionFacts">
+            <div><span>设备</span><strong>--</strong></div>
+            <div><span>链路</span><strong>--</strong></div>
+            <div><span>反馈</span><strong>--</strong></div>
+          </div>
+        </aside>
+
+        <section class="activity-panel panel sidebar-activity">
+          <div class="panel-title">
+            <div><span class="section-index">05</span><h2>操作记录</h2></div>
+            <button class="text-button" id="clearLogButton">清空</button>
+          </div>
+          <div class="activity-list" id="activityList"></div>
+        </section>
+      </div>
 
       <section class="control-column">
         <div class="control-toolbar">
@@ -66,10 +76,65 @@
           </label>
         </div>
 
+        <section class="vision-panel panel" id="visionPanel">
+          <div class="panel-title">
+            <div><span class="section-index">02</span><h2>视觉控制</h2></div>
+            <div class="vision-title-actions">
+              <span class="vision-state" id="visionState">未启动</span>
+              <button class="button secondary compact" id="calibrationButton" type="button" disabled>视觉标定</button>
+              <button class="icon-button" id="fullscreenVisionButton" type="button" title="全屏预览" aria-label="全屏预览">&#x26F6;</button>
+            </div>
+          </div>
+          <div class="vision-layout">
+            <div class="camera-stage">
+              <img id="visionFrame" alt="手势识别摄像头画面">
+              <div class="camera-placeholder" id="cameraPlaceholder">摄像头未启动</div>
+              <div class="camera-hud" id="cameraHud">
+                <span id="cameraModeBadge">仅识别</span>
+                <span id="cameraFrameBadge">0 帧</span>
+              </div>
+            </div>
+            <div class="vision-controls">
+              <div class="vision-fields">
+                <label class="field compact-field">
+                  <span>摄像头</span>
+                  <input type="number" id="cameraInput" min="0" step="1" value="0">
+                </label>
+                <label class="field compact-field">
+                  <span>识别手</span>
+                  <select id="visionSideSelect">
+                    <option value="right">右手</option>
+                    <option value="left">左手</option>
+                  </select>
+                </label>
+              </div>
+              <label class="live-toggle vision-dry-run">
+                <input type="checkbox" id="visionDryRun" checked>
+                <span aria-hidden="true"></span>
+                仅识别（不控制）
+              </label>
+              <div class="vision-readout">
+                <div><span>手势</span><strong id="visionGesture">--</strong></div>
+                <div><span>拇指屈伸</span><strong id="visionThumbFlex">--</strong></div>
+                <div><span>拇指侧摆</span><strong id="visionThumbAux">--</strong></div>
+                <div><span>跟踪坐标</span><strong id="visionTrackingSpace">--</strong></div>
+                <div><span>视觉标定</span><strong id="visionCalibrationState">默认</strong></div>
+                <div><span>画面</span><strong id="visionFrames">0 帧</strong></div>
+                <div><span>指令</span><strong id="visionCommands">0</strong></div>
+                <div><span>状态</span><strong id="visionDetail">待机</strong></div>
+              </div>
+              <div class="vision-actions">
+                <button class="button danger" id="stopVisionButton" disabled>停止视觉控制</button>
+                <button class="button primary" id="startVisionButton">启动视觉控制</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <div class="control-grid">
           <section class="joint-panel panel">
             <div class="panel-title">
-              <div><span class="section-index">02</span><h2>关节位置</h2></div>
+              <div><span class="section-index">03</span><h2>关节位置</h2></div>
               <span class="range-caption">0 张开 / 100 闭合</span>
             </div>
             <div class="joint-list" id="jointList"></div>
@@ -87,27 +152,97 @@
           <aside class="right-column">
             <section class="pose-panel panel">
               <div class="panel-title">
-                <div><span class="section-index">03</span><h2>姿态预览</h2></div>
+                <div><span class="section-index">04</span><h2>姿态预览</h2></div>
                 <span class="side-name" id="previewSide">右手</span>
               </div>
               <div class="hand-stage" id="handStage" aria-label="当前手指位置三维预览">
                 <div class="model-state" id="modelState">模型加载中</div>
               </div>
-              <div class="quick-actions" id="quickActions"></div>
-            </section>
-
-            <section class="activity-panel panel">
-              <div class="panel-title">
-                <div><span class="section-index">04</span><h2>操作记录</h2></div>
-                <button class="text-button" id="clearLogButton">清空</button>
+              <div class="pose-library">
+                <div class="pose-library-heading">
+                  <div>
+                    <strong>姿态库</strong>
+                    <span>载入后由“执行姿态”确认发送</span>
+                  </div>
+                  <button class="button secondary compact" id="addPoseButton" type="button">新增姿态</button>
+                </div>
+                <div class="pose-list" id="poseList"></div>
               </div>
-              <div class="activity-list" id="activityList"></div>
             </section>
           </aside>
         </div>
       </section>
+
     </main>
   </div>
+
+  <dialog class="pose-dialog" id="poseDialog">
+    <form method="dialog" id="poseForm">
+      <div class="dialog-heading">
+        <div>
+          <span class="section-index">POSE</span>
+          <h2 id="poseDialogTitle">新增姿态</h2>
+        </div>
+        <button class="icon-button" id="closePoseDialogButton" type="button" title="关闭" aria-label="关闭">&times;</button>
+      </div>
+      <div class="pose-form-names">
+        <label class="field">
+          <span>英文名称</span>
+          <input id="poseNameEn" type="text" maxlength="64" placeholder="例如 Cabinet Rotation" required>
+        </label>
+        <label class="field">
+          <span>中文描述</span>
+          <input id="poseDescriptionZh" type="text" maxlength="64" placeholder="例如 旋转配电柜手势" required>
+        </label>
+      </div>
+      <div class="pose-joint-heading">
+        <strong>姿态关节</strong>
+        <span>0 张开 / 100 闭合</span>
+      </div>
+      <div class="pose-joint-fields" id="poseJointFields"></div>
+      <div class="dialog-actions">
+        <button class="button secondary" id="cancelPoseButton" type="button">取消</button>
+        <button class="button primary" type="submit">保存姿态</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="calibration-dialog" id="calibrationDialog">
+    <div class="dialog-heading">
+      <div>
+        <span class="section-index">CAL</span>
+        <h2>视觉标定</h2>
+      </div>
+      <button class="icon-button" id="closeCalibrationButton" type="button" title="关闭" aria-label="关闭">&times;</button>
+    </div>
+    <div class="calibration-progress">
+      <div><strong id="calibrationSummary">未标定</strong><span id="calibrationProgressText">0 / 4</span></div>
+      <progress id="calibrationProgress" max="4" value="0"></progress>
+    </div>
+    <div class="calibration-steps">
+      <div class="calibration-step" data-calibration-row="open">
+        <span><i>01</i><strong>完全张开</strong></span>
+        <button class="button secondary compact" type="button" data-calibration-stage="open">采集</button>
+      </div>
+      <div class="calibration-step" data-calibration-row="fist">
+        <span><i>02</i><strong>完全握拳</strong></span>
+        <button class="button secondary compact" type="button" data-calibration-stage="fist">采集</button>
+      </div>
+      <div class="calibration-step" data-calibration-row="thumb_abducted">
+        <span><i>03</i><strong>拇指最大外展</strong></span>
+        <button class="button secondary compact" type="button" data-calibration-stage="thumb_abducted">采集</button>
+      </div>
+      <div class="calibration-step" data-calibration-row="thumb_adducted">
+        <span><i>04</i><strong>拇指最大内收</strong></span>
+        <button class="button secondary compact" type="button" data-calibration-stage="thumb_adducted">采集</button>
+      </div>
+    </div>
+    <div class="calibration-error" id="calibrationError"></div>
+    <div class="dialog-actions calibration-actions">
+      <button class="button danger" id="resetCalibrationButton" type="button">恢复默认标定</button>
+      <button class="button secondary" id="finishCalibrationButton" type="button">完成</button>
+    </div>
+  </dialog>
 
   <div class="toast" id="toast" role="status"></div>
   <script src="/hand-preview.js"></script>

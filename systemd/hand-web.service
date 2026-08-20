@@ -12,10 +12,9 @@ Environment=HOME=/home/robot
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONNOUSERSITE=1
 Environment=HAND_WEB_HOST=0.0.0.0
-Environment=HAND_WEB_PORT=18089
 Environment=PATH=/home/robot/miniconda3/envs/teleop/bin:/home/robot/miniconda3/condabin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=-@PROJECT_ROOT@/config/hand_web.env
-ExecStart=/home/robot/miniconda3/envs/teleop/bin/python3 -m hand_web.server --host ${HAND_WEB_HOST} --port ${HAND_WEB_PORT} --config @PROJECT_ROOT@/hand_web/config.json --log-dir @PROJECT_ROOT@/logs
+ExecStart=/home/robot/miniconda3/envs/teleop/bin/python3 -m hand_web.server --host ${HAND_WEB_HOST} --port 18089 --config @PROJECT_ROOT@/hand_web/config.json --log-dir @PROJECT_ROOT@/logs
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20

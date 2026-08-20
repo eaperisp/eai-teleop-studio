@@ -1,0 +1,3 @@
+# Optional: only required for camera gesture control.
+# mediapipe installs opencv-contrib-python, so do not install opencv-python as well.
+mediapipe==0.10.21

@@ -15,3 +15,12 @@ __pycache__/
 
 # Codex local temp files
 .codex_*
+
+# Runtime logs and process lock files
+logs/
+
+# Runtime hand pose library
+hand_web/poses.json
+hand_web/poses.json.tmp
+hand_web/vision_calibration.json
+hand_web/vision_calibration.json.tmp

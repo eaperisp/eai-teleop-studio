@@ -51,6 +51,8 @@ On the target host:
   cd ${remote_dir}
   tar -xzf $(basename "${ARCHIVE}")
   cd ${PROJECT_NAME}
+  /home/robot/miniconda3/envs/teleop/bin/python3 -m pip install -r requirements.txt
+  /home/robot/miniconda3/envs/teleop/bin/python3 -m pip install -r hand_web/requirements-vision.txt
   sudo bash scripts/install_autostart_services.sh
 EOF
 fi

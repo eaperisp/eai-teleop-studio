@@ -69,9 +69,9 @@ class BraincoHandSDK:
             },
             "joints": [joint.to_dict() for joint in BRAINCO_JOINTS],
             "quick_actions": [
-                {"id": "open", "name": "张开", "positions": [0.0] * HAND_DOF},
-                {"id": "half", "name": "半握", "positions": [0.45] * HAND_DOF},
-                {"id": "close", "name": "握合", "positions": [0.82] * HAND_DOF},
+                {"id": "open", "name": "张开", "name_en": "Open", "positions": [0.0] * HAND_DOF},
+                {"id": "half", "name": "半握", "name_en": "Half Grip", "positions": [0.45] * HAND_DOF},
+                {"id": "close", "name": "握合", "name_en": "Grip", "positions": [0.82] * HAND_DOF},
             ],
             "transports": [
                 {

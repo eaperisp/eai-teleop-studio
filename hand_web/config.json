@@ -1,7 +1,30 @@
 {
   "web": {
-    "host": "127.0.0.1",
+    "host": "0.0.0.0",
     "port": 18089
+  },
+  "vision": {
+    "camera": 0,
+    "side": "right",
+    "width": 960,
+    "height": 540,
+    "preview_fps": 10,
+    "min_detection_confidence": 0.65,
+    "min_tracking_confidence": 0.65,
+    "filter_min_cutoff": 1.2,
+    "filter_beta": 0.08,
+    "filter_derivative_cutoff": 1.0,
+    "max_velocity": 3.0,
+    "endpoint_snap": 0.025,
+    "thumb_flex_aux_coupling": 0.9,
+    "deadband": 0.005,
+    "change_threshold": 0.01,
+    "min_interval": 0.12,
+    "duration_ms": 180,
+    "warmup_frames": 5,
+    "calibration_samples": 24,
+    "lost_timeout": 0.6,
+    "joint_limits": [[0.0, 0.98], [0.0, 0.7], [0.0, 0.98], [0.0, 0.98], [0.0, 0.98], [0.0, 0.98]]
   },
   "default_device": "brainco_revo2",
   "devices": {

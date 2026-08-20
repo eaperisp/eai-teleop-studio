@@ -12,10 +12,21 @@ const state = {
   pendingCommands: new Set(),
   stopping: false,
   initializedFromState: new Set(),
+  poses: [],
+  editingPoseId: null,
+  calibration: {},
+  vision: { available: null, starting: false, running: false, stopping: false, dry_run: false },
+  visionFrameLoading: false,
 };
 
 const $ = (id) => document.getElementById(id);
 const handPreview = new window.HandModelPreview($('handStage'), $('modelState'));
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;',
+  }[character]));
+}
 
 function log(message, tone = '') {
   const row = document.createElement('div');
@@ -73,15 +84,37 @@ function cancelLiveTimer() {
 }
 
 function updateControlAvailability() {
-  const ready = state.connected && targetReady() && !state.stopping;
+  const manualLocked = state.vision.starting || state.vision.running || state.vision.stopping;
+  const ready = state.connected && targetReady() && !state.stopping && !manualLocked;
   $('sendButton').disabled = !ready;
-  $('stopButton').disabled = !state.connected || state.stopping;
+  $('stopButton').disabled = !state.connected || state.stopping || manualLocked;
   $('liveToggle').disabled = !ready;
+  $('connectButton').disabled = state.connected || manualLocked;
+  $('disconnectButton').disabled = !state.connected || manualLocked;
+  $('deviceSelect').disabled = state.connected || manualLocked;
+  $('transportSelect').disabled = state.connected || manualLocked;
+  document.querySelectorAll('[data-connection-field]').forEach((input) => {
+    input.disabled = state.connected || manualLocked;
+  });
   document.querySelectorAll('[data-joint], [data-joint-value]').forEach((input) => {
     input.disabled = !ready;
   });
-  document.querySelectorAll('[data-action]').forEach((button) => {
-    button.disabled = state.connected && !ready;
+  document.querySelectorAll('[data-pose-action], #addPoseButton').forEach((button) => {
+    button.disabled = manualLocked || (state.connected && !ready);
+  });
+  const dryRun = $('visionDryRun').checked;
+  $('startVisionButton').textContent = '启动视觉控制';
+  $('startVisionButton').disabled = state.vision.starting || state.vision.running || state.vision.stopping
+    || state.vision.available === false || (!state.connected && !dryRun);
+  $('stopVisionButton').disabled = !state.vision.running || state.vision.stopping;
+  $('cameraInput').disabled = manualLocked;
+  $('visionSideSelect').disabled = manualLocked;
+  $('visionDryRun').disabled = manualLocked;
+  $('calibrationButton').disabled = !state.vision.running || !state.vision.dry_run
+    || Boolean(state.calibration.active_stage);
+  document.querySelectorAll('[data-calibration-stage]').forEach((button) => {
+    button.disabled = !state.vision.running || !state.vision.dry_run
+      || Boolean(state.calibration.active_stage);
   });
 }
 
@@ -95,9 +128,10 @@ function selectDevice(deviceId) {
   $('deviceSubtitle').textContent = `${state.device.manufacturer} ${state.device.model}`;
   state.values = {};
   state.actual = {};
+  state.poses = [];
   state.initializedFromState.clear();
   renderTransport();
-  renderQuickActions();
+  renderPoseLibrary();
   renderJoints();
 }
 
@@ -167,6 +201,7 @@ function renderSideTabs() {
     });
   });
   $('previewSide').textContent = state.activeSide === 'left' ? '左手' : '右手';
+  if (!state.vision.running) $('visionSideSelect').value = state.activeSide;
 }
 
 function renderJoints() {
@@ -183,7 +218,8 @@ function renderJoints() {
         <input type="range" min="0" max="100" step="1" value="${value}" data-joint="${index}" ${state.connected && targetReady() && !state.stopping ? '' : 'disabled'}>
         <div class="actual-track"><i style="left:${actualValue ?? 0}%" class="${actualValue === null ? 'hidden' : ''}"></i></div>
       </div>
-      <label class="value-box"><input type="number" min="0" max="100" value="${value}" data-joint-value="${index}" ${state.connected && targetReady() && !state.stopping ? '' : 'disabled'}><span>%</span></label>
+      <label class="joint-value target-value"><span>设置</span><span class="value-box"><input type="number" min="0" max="100" value="${value}" data-joint-value="${index}" ${state.connected && targetReady() && !state.stopping ? '' : 'disabled'}><i>%</i></span></label>
+      <div class="joint-value actual-value"><span>当前</span><output class="value-box" data-joint-actual="${index}">${actualValue === null ? '--' : `${actualValue}<i>%</i>`}</output></div>
     </div>`;
   }).join('');
 
@@ -199,10 +235,16 @@ function renderJoints() {
 
 function updateActualMarkers() {
   const actual = state.actual[state.activeSide];
-  if (!actual) return;
+  if (!actual) {
+    document.querySelectorAll('[data-joint-actual]').forEach((output) => { output.textContent = '--'; });
+    return;
+  }
   document.querySelectorAll('.actual-track i').forEach((marker, index) => {
-    marker.style.left = `${Math.round(actual[index] * 100)}%`;
+    const percent = Math.round(actual[index] * 100);
+    marker.style.left = `${percent}%`;
     marker.classList.remove('hidden');
+    const output = document.querySelector(`[data-joint-actual="${index}"]`);
+    if (output) output.innerHTML = `${percent}<i>%</i>`;
   });
 }
 
@@ -223,19 +265,113 @@ function updateHandPreview() {
   handPreview.setPose(state.activeSide, state.values[state.activeSide]);
 }
 
-function renderQuickActions() {
-  $('quickActions').innerHTML = (state.device.quick_actions || []).map((action) => (
-    `<button class="quick-button" data-action="${action.id}">${action.name}</button>`
-  )).join('');
-  document.querySelectorAll('[data-action]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const action = state.device.quick_actions.find((item) => item.id === button.dataset.action);
-      state.values[state.activeSide] = action.positions.slice();
-      renderJoints();
-      if (state.connected) sendCommand();
-    });
+function renderPoseLibrary() {
+  if (!state.device) return;
+  if (!state.poses.length) {
+    $('poseList').innerHTML = '<div class="pose-empty">暂无保存的姿态</div>';
+  } else {
+    $('poseList').innerHTML = state.poses.map((pose) => `
+      <div class="pose-item">
+        <div class="pose-copy">
+          <strong>${escapeHtml(pose.description_zh)}</strong>
+          <span>${escapeHtml(pose.name_en)}</span>
+        </div>
+        <div class="pose-actions">
+          <button class="pose-command" type="button" data-pose-action="apply" data-pose-id="${escapeHtml(pose.id)}">载入</button>
+          <button class="icon-button pose-icon" type="button" data-pose-action="edit" data-pose-id="${escapeHtml(pose.id)}" title="编辑姿态" aria-label="编辑姿态">&#9998;</button>
+          <button class="icon-button pose-icon danger-icon" type="button" data-pose-action="delete" data-pose-id="${escapeHtml(pose.id)}" title="删除姿态" aria-label="删除姿态">&times;</button>
+        </div>
+      </div>`).join('');
+  }
+  document.querySelectorAll('[data-pose-action]').forEach((button) => {
+    button.addEventListener('click', () => handlePoseAction(button.dataset.poseAction, button.dataset.poseId));
   });
   updateControlAvailability();
+}
+
+async function loadPoses() {
+  if (!state.device) return;
+  try {
+    const payload = await request(`/api/poses?device_id=${encodeURIComponent(state.device.id)}`);
+    state.poses = payload.poses || [];
+  } catch (error) {
+    state.poses = [];
+    log(`姿态库加载失败：${error.message}`, 'error');
+    toast(error.message, 'error');
+  }
+  renderPoseLibrary();
+}
+
+function openPoseDialog(pose = null) {
+  ensureSide(state.activeSide);
+  state.editingPoseId = pose?.id || null;
+  $('poseDialogTitle').textContent = pose ? '编辑姿态' : '新增姿态';
+  $('poseNameEn').value = pose?.name_en || '';
+  $('poseDescriptionZh').value = pose?.description_zh || '';
+  const positions = pose?.positions || state.values[state.activeSide];
+  $('poseJointFields').innerHTML = state.device.joints.map((joint, index) => `
+    <label>
+      <span><strong>${escapeHtml(joint.name)}</strong><small>${escapeHtml(joint.english_name)}</small></span>
+      <span class="pose-joint-input"><input type="number" min="0" max="100" step="1" value="${Math.round(positions[index] * 100)}" data-pose-joint="${index}" required><i>%</i></span>
+    </label>`).join('');
+  $('poseDialog').showModal();
+  $('poseNameEn').focus();
+}
+
+function closePoseDialog() {
+  state.editingPoseId = null;
+  $('poseDialog').close();
+}
+
+function handlePoseAction(action, poseId) {
+  const pose = state.poses.find((item) => item.id === poseId);
+  if (!pose) return;
+  if (action === 'apply') {
+    state.values[state.activeSide] = pose.positions.slice();
+    renderJoints();
+    log(`已载入姿态：${pose.description_zh}`);
+    toast('姿态已载入，请确认后执行');
+  } else if (action === 'edit') {
+    openPoseDialog(pose);
+  } else if (action === 'delete') {
+    deletePose(pose);
+  }
+}
+
+async function savePose(event) {
+  event.preventDefault();
+  const positions = [...document.querySelectorAll('[data-pose-joint]')]
+    .map((input) => Math.max(0, Math.min(100, Number(input.value))) / 100);
+  try {
+    const payload = await request('/api/poses/save', {
+      id: state.editingPoseId || undefined,
+      device_id: state.device.id,
+      name_en: $('poseNameEn').value,
+      description_zh: $('poseDescriptionZh').value,
+      positions,
+    });
+    state.poses = payload.poses;
+    const operation = state.editingPoseId ? '已更新姿态' : '已保存姿态';
+    closePoseDialog();
+    renderPoseLibrary();
+    log(`${operation}：${payload.pose.description_zh}`, 'success');
+    toast(operation);
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function deletePose(pose) {
+  if (!window.confirm(`确定删除“${pose.description_zh} / ${pose.name_en}”吗？`)) return;
+  try {
+    const payload = await request('/api/poses/delete', { device_id: state.device.id, id: pose.id });
+    state.poses = payload.poses;
+    renderPoseLibrary();
+    log(`已删除姿态：${pose.description_zh}`, 'warning');
+    toast('姿态已删除');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
 }
 
 function setConnectionState(connected, status = {}) {
@@ -256,9 +392,183 @@ function setConnectionState(connected, status = {}) {
     state.actual = {};
   }
   renderJoints();
-  renderQuickActions();
+  renderPoseLibrary();
   updateControlAvailability();
   updateFacts(status);
+}
+
+function renderVisionStatus(status) {
+  const wasRunning = state.vision.running;
+  state.vision = status;
+  const active = status.starting || status.running;
+  document.body.classList.toggle('vision-active', active);
+  $('visionState').textContent = status.starting ? '正在启动'
+    : status.running ? (status.dry_run ? '仅识别' : '控制中') : '未启动';
+  $('visionState').className = `vision-state ${active ? 'active' : ''} ${status.error ? 'error' : ''}`;
+  $('visionGesture').textContent = status.gesture === 'Fist' ? '握拳'
+    : status.gesture === 'Open Hand' ? '张开' : status.running ? '识别中' : '--';
+  const positions = Array.isArray(status.positions) ? status.positions : null;
+  $('visionThumbFlex').textContent = positions ? `${Math.round(positions[0] * 100)}%` : '--';
+  $('visionThumbAux').textContent = positions ? `${Math.round(positions[1] * 100)}%` : '--';
+  $('visionTrackingSpace').textContent = status.tracking_space === 'world' ? '世界坐标'
+    : status.tracking_space === 'normalized' ? '图像坐标' : '--';
+  state.calibration = status.calibration || {};
+  $('visionCalibrationState').textContent = state.calibration.profile_available ? '已标定' : '默认';
+  $('visionCommands').textContent = String(status.commands || 0);
+  $('visionFrames').textContent = `${status.frames || 0} 帧`;
+  $('cameraFrameBadge').textContent = `${status.frames || 0} 帧`;
+  $('cameraModeBadge').textContent = status.dry_run ? '仅识别' : '视觉控制';
+  $('stopVisionButton').textContent = '停止视觉控制';
+  $('visionDetail').textContent = status.error || (status.starting ? '正在打开摄像头' : status.running ? (status.last_detection_at ? '已检测' : '等待手部') : '待机');
+  renderCalibration();
+  if (status.running && Array.isArray(status.positions) && status.side) {
+    ensureSide(status.side);
+    state.values[status.side] = status.positions.slice();
+    if (state.activeSide === status.side) {
+      renderJoints();
+      updateHandPreview();
+    }
+  }
+  if (wasRunning && !status.running && !status.dry_run) {
+    state.initializedFromState.delete(status.side || state.activeSide);
+  }
+  if (!active) {
+    $('visionFrame').classList.remove('visible');
+    $('cameraPlaceholder').textContent = status.error || (status.available === false ? '视觉依赖未安装' : '摄像头未启动');
+    $('cameraPlaceholder').classList.remove('hidden');
+  }
+  updateControlAvailability();
+}
+
+async function pollVisionStatus() {
+  try {
+    renderVisionStatus(await request('/api/vision/status'));
+  } catch (error) {
+    $('visionDetail').textContent = error.message;
+  }
+}
+
+function refreshVisionFrame() {
+  if (!state.vision.running || state.visionFrameLoading || !state.vision.last_frame_at) return;
+  state.visionFrameLoading = true;
+  $('visionFrame').src = `/api/vision/frame?t=${Date.now()}`;
+}
+
+async function startVision() {
+  cancelLiveTimer();
+  $('liveToggle').checked = false;
+  $('startVisionButton').disabled = true;
+  try {
+    const dryRun = $('visionDryRun').checked;
+    const status = await request('/api/vision/start', {
+      device_id: state.device.id,
+      camera: Number($('cameraInput').value),
+      side: $('visionSideSelect').value,
+      dry_run: dryRun,
+      control_enabled: !dryRun,
+    });
+    renderVisionStatus(status);
+    log(status.dry_run ? '视觉识别已启动' : '视觉控制已启动', 'success');
+  } catch (error) {
+    if (error.message.includes('视觉控制已经在运行')) {
+      const status = await request('/api/vision/status');
+      renderVisionStatus(status);
+      if (status.starting || status.running) {
+        log('已接入当前视觉会话', 'success');
+        return;
+      }
+    }
+    log(`视觉启动失败：${error.message}`, 'error');
+    toast(error.message, 'error');
+    await pollVisionStatus();
+  }
+}
+
+async function stopVision() {
+  state.vision.stopping = true;
+  updateControlAvailability();
+  try {
+    const status = await request('/api/vision/stop', {});
+    renderVisionStatus(status);
+    log(status.message || '视觉控制已停止', 'warning');
+    await pollStatus();
+  } catch (error) {
+    toast(error.message, 'error');
+    await pollVisionStatus();
+  }
+}
+
+function renderCalibration() {
+  const calibration = state.calibration || {};
+  const completed = new Set(calibration.completed_stages || []);
+  const active = calibration.active_stage || null;
+  document.querySelectorAll('[data-calibration-row]').forEach((row) => {
+    const stage = row.dataset.calibrationRow;
+    row.classList.toggle('completed', completed.has(stage));
+    row.classList.toggle('active', active === stage);
+    const button = row.querySelector('button');
+    button.textContent = completed.has(stage) ? '重新采集' : active === stage ? '采集中' : '采集';
+  });
+  const completedCount = completed.size;
+  $('calibrationProgress').value = completedCount;
+  $('calibrationProgressText').textContent = active
+    ? `${calibration.sample_count || 0} / ${calibration.sample_target || 24} 帧`
+    : `${completedCount} / 4`;
+  $('calibrationSummary').textContent = active ? '保持当前姿势'
+    : calibration.profile_available ? '标定已应用' : completedCount ? '继续完成标定' : '使用默认标定';
+  $('calibrationError').textContent = calibration.error || '';
+  $('resetCalibrationButton').disabled = Boolean(active) || (!calibration.profile_available && !completedCount);
+}
+
+function openCalibration() {
+  renderCalibration();
+  $('calibrationDialog').showModal();
+}
+
+function closeCalibration() {
+  $('calibrationDialog').close();
+}
+
+async function captureCalibration(stage) {
+  try {
+    state.calibration = await request('/api/vision/calibration/capture', {
+      stage,
+      sample_count: state.calibration.sample_target || 24,
+    });
+    renderCalibration();
+    updateControlAvailability();
+    log(`开始采集视觉标定：${stage}`);
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function resetCalibration() {
+  if (!window.confirm('确定恢复当前设备和安装侧的默认视觉标定吗？')) return;
+  try {
+    state.calibration = await request('/api/vision/calibration/reset', {
+      device_id: state.device.id,
+      side: $('visionSideSelect').value,
+    });
+    renderCalibration();
+    updateControlAvailability();
+    log('视觉标定已恢复默认', 'warning');
+    toast('已恢复默认视觉标定');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function toggleVisionFullscreen() {
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+    } else {
+      await $('visionPanel').requestFullscreen();
+    }
+  } catch (error) {
+    toast(`无法切换全屏：${error.message}`, 'error');
+  }
 }
 
 function updateFacts(status) {
@@ -418,26 +728,64 @@ async function initialize() {
     $('deviceSelect').innerHTML = state.devices.map((device) => `<option value="${device.id}">${device.name}</option>`).join('');
     $('deviceSelect').value = payload.default_device;
     selectDevice(payload.default_device);
+    await loadPoses();
     state.enabledSides = ['right'];
     ensureSide('right');
     renderSideTabs();
     setConnectionState(false);
     log('调试服务已就绪');
     await pollStatus();
+    await pollVisionStatus();
   } catch (error) {
     $('statusLabel').textContent = '服务未启动';
     $('statusDetail').textContent = error.message;
   }
 }
 
-$('deviceSelect').addEventListener('change', (event) => selectDevice(event.target.value));
+$('deviceSelect').addEventListener('change', async (event) => {
+  selectDevice(event.target.value);
+  await loadPoses();
+});
 $('transportSelect').addEventListener('change', renderTransport);
 $('connectButton').addEventListener('click', connectDevice);
 $('disconnectButton').addEventListener('click', disconnectDevice);
 $('sendButton').addEventListener('click', () => sendCommand());
 $('stopButton').addEventListener('click', stopMotion);
+$('startVisionButton').addEventListener('click', startVision);
+$('stopVisionButton').addEventListener('click', stopVision);
+$('fullscreenVisionButton').addEventListener('click', toggleVisionFullscreen);
+$('calibrationButton').addEventListener('click', openCalibration);
+$('closeCalibrationButton').addEventListener('click', closeCalibration);
+$('finishCalibrationButton').addEventListener('click', closeCalibration);
+$('resetCalibrationButton').addEventListener('click', resetCalibration);
+document.querySelectorAll('[data-calibration-stage]').forEach((button) => {
+  button.addEventListener('click', () => captureCalibration(button.dataset.calibrationStage));
+});
+$('calibrationDialog').addEventListener('click', (event) => {
+  if (event.target === $('calibrationDialog')) closeCalibration();
+});
+$('visionDryRun').addEventListener('change', updateControlAvailability);
+document.addEventListener('fullscreenchange', () => {
+  const active = document.fullscreenElement === $('visionPanel');
+  $('fullscreenVisionButton').classList.toggle('active', active);
+  $('fullscreenVisionButton').title = active ? '退出全屏' : '全屏预览';
+  $('fullscreenVisionButton').setAttribute('aria-label', active ? '退出全屏' : '全屏预览');
+});
+$('visionFrame').addEventListener('load', () => {
+  state.visionFrameLoading = false;
+  $('visionFrame').classList.add('visible');
+  $('cameraPlaceholder').classList.add('hidden');
+});
+$('visionFrame').addEventListener('error', () => { state.visionFrameLoading = false; });
 $('durationInput').addEventListener('input', () => { $('durationOutput').textContent = `${$('durationInput').value} ms`; });
 $('clearLogButton').addEventListener('click', () => { $('activityList').innerHTML = ''; });
+$('addPoseButton').addEventListener('click', () => openPoseDialog());
+$('poseForm').addEventListener('submit', savePose);
+$('cancelPoseButton').addEventListener('click', closePoseDialog);
+$('closePoseDialogButton').addEventListener('click', closePoseDialog);
+$('poseDialog').addEventListener('click', (event) => {
+  if (event.target === $('poseDialog')) closePoseDialog();
+});
 document.addEventListener('keydown', (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
     event.preventDefault();
@@ -448,3 +796,5 @@ document.addEventListener('keydown', (event) => {
 
 initialize();
 setInterval(pollStatus, 800);
+setInterval(pollVisionStatus, 500);
+setInterval(refreshVisionFrame, 100);
