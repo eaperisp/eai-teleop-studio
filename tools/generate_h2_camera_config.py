@@ -16,9 +16,8 @@ Typical workflow on the camera host:
       -o teleop/teleimager/cam_config_server.yaml
 
 Use --depth none for RGB-only config, --depth head for head RGB-D only, and
---depth all for head/torso/left-wrist/right-wrist RGB-D templates. Generated
-RGB-D streams are disabled by default; set the desired *_rgbd_camera.enable_zmq
-to true when you want to publish one.
+--depth all for head/torso/left-wrist/right-wrist RGB-D streams. Generated
+RGB-D streams are enabled for ZMQ by default.
 
 The generated config uses stable selectors:
 serial_number + usb_interface + video_index.
@@ -337,7 +336,7 @@ def depth_config(
 
 def rgbd_config(*, zmq_port: int, color_camera: str, depth: dict[str, object], fps: int) -> dict[str, object]:
     return {
-        "enable_zmq": False,
+        "enable_zmq": True,
         "zmq_port": zmq_port,
         "enable_webrtc": False,
         "webrtc_port": None,

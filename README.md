@@ -246,10 +246,13 @@ python tools/generate_h2_camera_config.py \
   --left-serial <left_wrist_serial> \
   --right-serial <right_wrist_serial> \
   --depth head \
+  --color-size 1920x1080 \
   --head-color-size 1920x1080 \
   --head-depth-size 1280x800 \
   -o /tmp/cam_config_server.yaml
 ```
+
+`--depth head` 和 `--depth all` 生成的 RGB-D 流默认启用 ZMQ；`--depth none` 不生成深度配置。
 
 `--depth` 可选值：
 
