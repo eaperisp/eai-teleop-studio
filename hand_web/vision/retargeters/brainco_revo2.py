@@ -28,6 +28,9 @@ class SixJointHandRetargeter:
         self.deadband = max(0.0, float(config.get("deadband", 0.005)))
         self.max_velocity = max(0.1, float(config.get("max_velocity", 3.0)))
         self.endpoint_snap = max(0.0, min(0.15, float(config.get("endpoint_snap", 0.025))))
+        self.open_gesture_snap_max = max(
+            0.0, min(0.6, float(config.get("open_gesture_snap_max", 0.28)))
+        )
         self.thumb_flex_aux_coupling = max(
             0.0, min(1.0, float(config.get("thumb_flex_aux_coupling", 0.9)))
         )
@@ -68,9 +71,9 @@ class SixJointHandRetargeter:
         # Coupled robot thumbs need both active axes when the human thumb moves
         # inward against the palm, even if the visible IP segment is straight.
         raw[0] = max(raw[0], raw[1] * self.thumb_flex_aux_coupling)
-        if gesture == "Open Hand":
-            # MediaPipe's label describes the four long fingers. The thumb can
-            # still adduct or flex while that label remains unchanged.
+        if gesture == "Open Hand" and max(raw[2:]) <= self.open_gesture_snap_max:
+            # The image-space label can remain "Open Hand" while a finger is
+            # visibly bent. Use it only when anatomical curl features agree.
             raw[2:] = [0.0] * 4
         self.last_unfiltered = raw[:]
         filtered = self.filter.filter(raw, timestamp)

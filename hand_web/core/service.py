@@ -29,6 +29,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "filter_derivative_cutoff": 1.0,
         "max_velocity": 3.0,
         "endpoint_snap": 0.025,
+        "open_gesture_snap_max": 0.28,
         "deadband": 0.005,
         "change_threshold": 0.01,
         "min_interval": 0.12,
@@ -155,11 +156,28 @@ class HandControlService:
             options=connection_fields,
         )
 
-        adapter_type = adapter_class(device_id)
-        adapter = adapter_type()
         with self._lock:
             if self._control_owner is not None:
                 raise RuntimeError(f"{self._owner_label(self._control_owner)}正在控制灵巧手，请先停止该控制源")
+            if self._adapter is not None and self._device_id == device_id and self._transport == transport:
+                current_status = self._adapter.status()
+                if current_status.get("connected"):
+                    self._log(
+                        "info",
+                        "hand connection reused",
+                        device_id=device_id,
+                        transport=transport,
+                    )
+                    return {
+                        "ok": True,
+                        "message": "设备已连接，已复用现有通信通道",
+                        "device_id": device_id,
+                        "transport": transport,
+                        "sides": list((current_status.get("hands") or {}).keys()),
+                        "reused": True,
+                    }
+            adapter_type = adapter_class(device_id)
+            adapter = adapter_type()
             if self._adapter is not None:
                 self._adapter.disconnect()
             self._adapter = None

@@ -233,6 +233,7 @@ body.vision-active .sidebar-activity { display: none; }
 
 .control-grid { display: grid; grid-template-columns: minmax(520px, 1.6fr) minmax(280px, .8fr); gap: 14px; }
 .joint-panel { padding: 18px; min-width: 0; }
+.joint-title-actions { display: flex; align-items: center; gap: 8px; }
 .range-caption, .side-name { color: var(--muted); font-size: 10px; }
 .joint-list { display: grid; }
 .joint-row {

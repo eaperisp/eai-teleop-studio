@@ -18,7 +18,9 @@ import re
 import signal
 import shlex
 import shutil
+import socket
 import ssl
+import struct
 import subprocess
 import sys
 import threading
@@ -1251,6 +1253,361 @@ class IpcBridge:
             self._context.term()
 
 
+class DamiaoMotorDebug:
+    ENABLE_FRAME = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC])
+    DISABLE_FRAME = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD])
+    ZERO_FRAME = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE])
+    CLEAR_ERROR_FRAME = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFB])
+    CAN_FRAME_FORMAT = "=IB3x8s"
+    CAN_FRAME_SIZE = struct.calcsize(CAN_FRAME_FORMAT)
+
+    def __init__(self) -> None:
+        self._socket: socket.socket | None = None
+        self.channel = ""
+        self.connected = False
+        self.last_action = ""
+        self.last_error = ""
+        self.last_frame: dict[str, Any] | None = None
+        self.last_feedback: dict[str, Any] | None = None
+        self.motion: dict[str, Any] = {"running": False}
+        self.updated_at = ""
+        self._lock = threading.RLock()
+        self._motion_stop = threading.Event()
+        self._motion_thread: threading.Thread | None = None
+
+    def state(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "connected": self.connected,
+                "channel": self.channel,
+                "last_action": self.last_action,
+                "last_error": self.last_error,
+                "last_frame": self.last_frame,
+                "last_feedback": self.last_feedback,
+                "motion": dict(self.motion),
+                "updated_at": self.updated_at,
+                "socketcan_available": hasattr(socket, "PF_CAN") and hasattr(socket, "CAN_RAW"),
+            }
+
+    def close(self) -> None:
+        self._stop_motion(send_stop=False)
+        with self._lock:
+            if self._socket is not None:
+                try:
+                    self._socket.close()
+                except OSError:
+                    pass
+            self._socket = None
+            self.connected = False
+
+    def connect(self, config: Any) -> dict[str, Any]:
+        parsed = self._validate_config(config)
+        with self._lock:
+            if not hasattr(socket, "PF_CAN") or not hasattr(socket, "CAN_RAW"):
+                raise ValidationError("当前系统不支持 SocketCAN；请在 Linux 机器人/工控机上使用 can0/vcan0")
+            if self._socket is not None and self.channel == parsed["can_device"]:
+                self.connected = True
+                self.last_action = "connect"
+                self._touch()
+                return self.state()
+            self.close()
+            try:
+                can_socket = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
+                can_socket.settimeout(0.08)
+                can_socket.bind((parsed["can_device"],))
+            except OSError as exc:
+                raise ValidationError(f"CAN 设备连接失败：{exc}") from exc
+            self._socket = can_socket
+            self.channel = parsed["can_device"]
+            self.connected = True
+            self.last_error = ""
+            self.last_action = "connect"
+            self._touch()
+            return self.state()
+
+    def control(self, action: Any, config: Any) -> dict[str, Any]:
+        action_name = _nonempty_string(action, "电机动作", 32)
+        parsed = self._validate_config(config)
+        if action_name == "connect":
+            return self.connect(parsed)
+        with self._lock:
+            if self._socket is None or self.channel != parsed["can_device"]:
+                self.connect(parsed)
+            if action_name in {"left", "right"}:
+                self._start_motion(action_name, parsed)
+                return self.state()
+            if action_name == "stop":
+                self._stop_motion(send_stop=True, config=parsed)
+                self.last_action = action_name
+                self.last_error = ""
+                self._touch()
+                return self.state()
+            if action_name in {"disable", "clear", "recover"}:
+                self._stop_motion(send_stop=True, config=parsed)
+            can_id, payload = self._frame_for_action(action_name, parsed)
+            self._send_frame(can_id, payload)
+            self.last_action = action_name
+            self.last_error = ""
+            self._read_feedback(parsed)
+            self._touch()
+            return self.state()
+
+    def _validate_config(self, raw: Any) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            raise ValidationError("电机配置格式不正确")
+        can_device = _nonempty_string(raw.get("canDevice") or raw.get("can_device") or "can0", "CAN 设备", 32)
+        if not re.fullmatch(r"[a-zA-Z0-9_.:-]+", can_device):
+            raise ValidationError("CAN 设备名称包含不支持的字符")
+        try:
+            can_id = int(raw.get("canId") if raw.get("canId") is not None else raw.get("can_id", 1))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("电机 ID 必须是数字") from exc
+        if not 0 <= can_id <= 0x7FF:
+            raise ValidationError("电机 ID 必须在 0 到 2047 之间")
+        try:
+            speed = abs(float(raw.get("turnSpeed") if raw.get("turnSpeed") is not None else raw.get("velocity", 0.5)))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("转动速度必须是数字") from exc
+        vmax = float(raw.get("vmax") or raw.get("defaultVmax") or 8.0)
+        if vmax <= 0:
+            vmax = 8.0
+        speed = max(0.0, min(speed, vmax))
+        try:
+            duration_s = float(raw.get("durationSec") if raw.get("durationSec") is not None else raw.get("duration_s", 1.0))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("转动时间必须是数字") from exc
+        duration_s = max(0.05, min(duration_s, 60.0))
+        try:
+            control_hz = float(raw.get("controlHz") if raw.get("controlHz") is not None else raw.get("control_hz", 50.0))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("控制频率必须是数字") from exc
+        control_hz = max(5.0, min(control_hz, 200.0))
+        try:
+            kp = float(raw.get("kp") if raw.get("kp") is not None else 0.0)
+            kd = float(raw.get("kd") if raw.get("kd") is not None else 1.0)
+            torque = float(raw.get("torque") if raw.get("torque") is not None else 0.0)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("高级调试参数必须是数字") from exc
+        return {
+            "can_device": can_device,
+            "can_id": can_id,
+            "turn_speed": speed,
+            "duration_s": duration_s,
+            "control_hz": control_hz,
+            "pmax": float(raw.get("pmax") or raw.get("defaultPmax") or 12.5),
+            "vmax": vmax,
+            "tmax": float(raw.get("tmax") or raw.get("defaultTmax") or 40.0),
+            "kp": max(0.0, min(kp, 500.0)),
+            "kd": max(0.0, min(kd, 5.0)),
+            "torque": max(-float(raw.get("tmax") or raw.get("defaultTmax") or 40.0), min(torque, float(raw.get("tmax") or raw.get("defaultTmax") or 40.0))),
+        }
+
+    def _start_motion(self, action: str, config: dict[str, Any]) -> None:
+        self._stop_motion(send_stop=True, config=config)
+        signed_speed = -float(config["turn_speed"]) if action == "left" else float(config["turn_speed"])
+        duration_s = float(config["duration_s"])
+        control_hz = float(config["control_hz"])
+        can_id = int(config["can_id"])
+        self._send_frame(can_id, self.ENABLE_FRAME)
+        self._read_feedback(config)
+        hold_position = (self.last_feedback or {}).get("position_rad", 0.0)
+        self._send_frame(can_id, self._make_mit_data(config, signed_speed, position=hold_position, kp=0.0))
+        now = time.time()
+        self.motion = {
+            "running": True,
+            "direction": action,
+            "speed_rad_s": signed_speed,
+            "duration_s": duration_s,
+            "control_hz": control_hz,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "deadline_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now + duration_s)),
+        }
+        self.last_action = action
+        self._motion_stop.clear()
+        self._motion_thread = threading.Thread(
+            target=self._motion_loop,
+            args=(can_id, signed_speed, duration_s, control_hz, dict(config)),
+            daemon=True,
+            name="damiao-motor-motion",
+        )
+        self._motion_thread.start()
+        self._touch()
+
+    def _motion_loop(
+        self,
+        can_id: int,
+        signed_speed: float,
+        duration_s: float,
+        control_hz: float,
+        config: dict[str, Any],
+    ) -> None:
+        started = time.monotonic()
+        interval = 1.0 / control_hz
+        stop_reason = "duration_elapsed"
+        try:
+            while not self._motion_stop.wait(interval):
+                if time.monotonic() - started >= duration_s:
+                    break
+                with self._lock:
+                    self._send_frame(can_id, self._make_mit_data(config, signed_speed, kp=0.0))
+                    self._read_feedback(config)
+                    state_code = (self.last_feedback or {}).get("state_code")
+                    if state_code not in (None, 0, 1):
+                        stop_reason = f"motor_error_{state_code}"
+                        break
+        except Exception as exc:
+            with self._lock:
+                self.last_error = str(exc)
+            stop_reason = "send_failed"
+        finally:
+            with self._lock:
+                try:
+                    self._send_frame(can_id, self._make_mit_data(config, 0.0, kp=0.0))
+                except Exception as exc:
+                    self.last_error = str(exc)
+                self.motion = {
+                    **self.motion,
+                    "running": False,
+                    "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "stop_reason": "manual_stop" if self._motion_stop.is_set() else stop_reason,
+                }
+                self.last_action = "stop"
+                self._touch()
+
+    def _stop_motion(self, *, send_stop: bool, config: dict[str, Any] | None = None) -> None:
+        thread = self._motion_thread
+        if thread and thread.is_alive():
+            self._motion_stop.set()
+            if thread is not threading.current_thread():
+                thread.join(timeout=0.5)
+        self._motion_thread = None
+        self._motion_stop.clear()
+        if send_stop and config is not None and self._socket is not None:
+            self._send_frame(int(config["can_id"]), self._make_mit_data(config, 0.0, kp=0.0))
+        self.motion = {
+            **self.motion,
+            "running": False,
+            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "stop_reason": "manual_stop" if send_stop else self.motion.get("stop_reason", "closed"),
+        }
+
+    def _frame_for_action(self, action: str, config: dict[str, Any]) -> tuple[int, bytes]:
+        can_id = int(config["can_id"])
+        if action == "enable":
+            return can_id, self.ENABLE_FRAME
+        if action == "disable":
+            return can_id, self.DISABLE_FRAME
+        if action == "zero":
+            return can_id, self.ZERO_FRAME
+        if action in {"clear", "recover"}:
+            return can_id, self.CLEAR_ERROR_FRAME
+        if action == "left":
+            return can_id, self._make_mit_data(config, -float(config["turn_speed"]), kp=0.0)
+        if action == "right":
+            return can_id, self._make_mit_data(config, float(config["turn_speed"]), kp=0.0)
+        if action == "stop":
+            return can_id, self._make_mit_data(config, 0.0, kp=0.0)
+        raise ValidationError(f"不支持的电机动作：{action}")
+
+    def _make_mit_data(
+        self,
+        config: dict[str, Any],
+        velocity: float,
+        *,
+        position: float | None = None,
+        kp: float | None = None,
+    ) -> bytes:
+        p_des = float(position) if position is not None else 0.0
+        kp_des = float(kp) if kp is not None else float(config["kp"])
+        p_int = self._float_to_uint(p_des, -float(config["pmax"]), float(config["pmax"]), 16)
+        v_int = self._float_to_uint(velocity, -float(config["vmax"]), float(config["vmax"]), 12)
+        kp_int = self._float_to_uint(kp_des, 0.0, 500.0, 12)
+        kd_int = self._float_to_uint(float(config["kd"]), 0.0, 5.0, 12)
+        t_int = self._float_to_uint(float(config["torque"]), -float(config["tmax"]), float(config["tmax"]), 12)
+        return bytes(
+            [
+                (p_int >> 8) & 0xFF,
+                p_int & 0xFF,
+                (v_int >> 4) & 0xFF,
+                ((v_int & 0x0F) << 4) | ((kp_int >> 8) & 0x0F),
+                kp_int & 0xFF,
+                (kd_int >> 4) & 0xFF,
+                ((kd_int & 0x0F) << 4) | ((t_int >> 8) & 0x0F),
+                t_int & 0xFF,
+            ]
+        )
+
+    def _send_frame(self, can_id: int, payload: bytes) -> None:
+        if self._socket is None:
+            raise ValidationError("CAN 设备尚未连接")
+        data = payload[:8].ljust(8, b"\x00")
+        frame = struct.pack(self.CAN_FRAME_FORMAT, can_id, min(len(payload), 8), data)
+        try:
+            self._socket.send(frame)
+        except OSError as exc:
+            self.connected = False
+            self.last_error = str(exc)
+            raise ValidationError(f"CAN 帧发送失败：{exc}") from exc
+        self.last_frame = {
+            "can_id": f"0x{can_id:X}",
+            "dlc": min(len(payload), 8),
+            "data": " ".join(f"{byte:02X}" for byte in data[: min(len(payload), 8)]),
+            "sent_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+
+    def _read_feedback(self, config: dict[str, Any]) -> None:
+        if self._socket is None:
+            return
+        try:
+            raw = self._socket.recv(self.CAN_FRAME_SIZE)
+        except TimeoutError:
+            return
+        except OSError:
+            return
+        if len(raw) < self.CAN_FRAME_SIZE:
+            return
+        can_id, dlc, data = struct.unpack(self.CAN_FRAME_FORMAT, raw[: self.CAN_FRAME_SIZE])
+        payload = data[:dlc]
+        feedback: dict[str, Any] = {
+            "can_id": f"0x{can_id:X}",
+            "dlc": dlc,
+            "data": " ".join(f"{byte:02X}" for byte in payload),
+            "received_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        if dlc >= 8:
+            pos_raw = (payload[1] << 8) | payload[2]
+            vel_raw = (payload[3] << 4) | (payload[4] >> 4)
+            torque_raw = ((payload[4] & 0x0F) << 8) | payload[5]
+            feedback.update(
+                {
+                    "motor_id": payload[0] & 0x0F,
+                    "state_code": (payload[0] >> 4) & 0x0F,
+                    "position_rad": round(self._uint_to_float(pos_raw, -config["pmax"], config["pmax"], 16), 4),
+                    "velocity_rad_s": round(self._uint_to_float(vel_raw, -config["vmax"], config["vmax"], 12), 4),
+                    "torque_nm": round(self._uint_to_float(torque_raw, -config["tmax"], config["tmax"], 12), 4),
+                    "mos_temp_c": payload[6],
+                    "motor_temp_c": payload[7],
+                }
+            )
+        self.last_feedback = feedback
+
+    @staticmethod
+    def _float_to_uint(value: float, minimum: float, maximum: float, bits: int) -> int:
+        value = max(minimum, min(float(value), maximum))
+        span = maximum - minimum
+        if span <= 0:
+            return 0
+        return int((value - minimum) * ((1 << bits) - 1) / span)
+
+    @staticmethod
+    def _uint_to_float(value: int, minimum: float, maximum: float, bits: int) -> float:
+        span = maximum - minimum
+        return float(value) * span / float((1 << bits) - 1) + minimum
+
+    def _touch(self) -> None:
+        self.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
 class TeleopManager:
     def __init__(
         self,
@@ -1290,6 +1647,7 @@ class TeleopManager:
         self.postprocess_jobs: dict[str, dict[str, Any]] = {}
         self.postprocess_processes: dict[str, subprocess.Popen[str]] = {}
         self.archive_jobs: dict[str, dict[str, Any]] = {}
+        self.motor_debug = DamiaoMotorDebug()
         self._lock = threading.RLock()
         self._log_thread: threading.Thread | None = None
         self._camera_cache: dict[str, Any] | None = None
@@ -5108,12 +5466,14 @@ class TeleopManager:
                     "packages": [],
                 },
                 "delivery": self.delivery_templates(),
+                "motor_debug": self.motor_debug.state(),
                 "camera_preview": self.camera_preview() if running else {"cameras": [], "error": None},
             }
 
     def close(self) -> None:
         if self.ipc is not None:
             self.ipc.close()
+        self.motor_debug.close()
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -5264,6 +5624,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 result = self.manager.save_delivery_templates(payload)
             elif path == "/api/delivery/templates/reset":
                 result = self.manager.reset_delivery_templates()
+            elif path == "/api/motor/connect":
+                result = {"motor_debug": self.manager.motor_debug.connect(payload.get("config"))}
+            elif path == "/api/motor/control":
+                result = {"motor_debug": self.manager.motor_debug.control(payload.get("action"), payload.get("config"))}
             elif path == "/api/start":
                 result = self.manager.start_task(payload.get("task_id"))
             elif path == "/api/control":

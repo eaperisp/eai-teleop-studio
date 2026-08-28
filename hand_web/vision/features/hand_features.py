@@ -89,7 +89,9 @@ class HandFeatureExtractor:
         mcp_flex = math.degrees(math.asin(max(-1.0, min(1.0, abs(proximal_direction[2])))))
         pip_bend = _bend(mcp, pip, dip)
         dip_bend = _bend(pip, dip, tip)
-        return max(0.0, min(150.0, mcp_flex * 0.35 + pip_bend * 0.40 + dip_bend * 0.25))
+        # Depth noise affects the MCP direction most when a hand is viewed at
+        # an angle. PIP/DIP bends are stronger evidence of an actual curl.
+        return max(0.0, min(150.0, mcp_flex * 0.15 + pip_bend * 0.50 + dip_bend * 0.35))
 
 
 __all__ = ["FEATURE_NAMES", "FINGER_CHAINS", "HandFeatureExtractor", "HandFeatures"]

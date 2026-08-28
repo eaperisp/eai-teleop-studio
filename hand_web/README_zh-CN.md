@@ -68,7 +68,6 @@ id robot
 ```bash
 cd /home/robot/eai-teleop-studio
 sudo bash scripts/install_autostart_services.sh hand-web.service
-sudo systemctl restart hand-web.service
 ```
 
 确认服务使用了预期的用户、Python 和端口：
@@ -85,13 +84,53 @@ curl -s http://127.0.0.1:18089/api/status
 http://<服务器局域网 IP>:18089/
 ```
 
-HTTP 可以用于设备连接、关节控制和姿态管理，但浏览器不允许远程 HTTP 页面调用访问者电脑的摄像头。需要浏览器视觉控制且不启用 HTTPS 时，在访问页面的电脑上建立 SSH 端口转发：
+HTTP 可以用于设备连接、关节控制和姿态管理，但浏览器不允许远程 HTTP 页面调用访问者电脑的摄像头。开发和现场排障时，可以在访问页面的电脑上建立 SSH 端口转发：
 
 ```bash
 ssh -L 18089:127.0.0.1:18089 robot@<服务器局域网 IP>
 ```
 
-保持该 SSH 会话运行，再访问 `http://127.0.0.1:18089/`。浏览器会把它视为本机安全来源，摄像头仍来自访问页面的电脑，API 请求则通过 SSH 隧道到达服务器。也可以使用服务内置的可选 `HAND_WEB_SCHEME=https`、`HAND_WEB_CERT` 和 `HAND_WEB_KEY` 配置直接启用 HTTPS。
+保持该 SSH 会话运行，再访问 `http://127.0.0.1:18089/`。浏览器会把它视为本机安全来源，摄像头仍来自访问页面的电脑，API 请求则通过 SSH 隧道到达服务器。SSH 隧道只用于开发和排障，不作为客户交付方案。
+
+### 客户交付 HTTPS
+
+客户环境应直接访问可信的 HTTPS 地址，不需要服务器账号或 SSH。浏览器按照 `协议 + 主机 + 端口` 区分来源，因此 `https://192.168.60.60:60001` 与 `https://192.168.60.60:18089` 的摄像头权限需要分别授权。
+
+首选方案是为服务器配置客户域名，并使用客户企业 CA 或公开 CA 签发的证书。证书 SAN 必须包含浏览器实际访问的域名；这样客户电脑不需要额外安装项目证书。将证书保存为 `config/cert.pem`、私钥保存为 `config/key.pem`，再按下面的 `config/hand_web.env` 启用 HTTPS。
+
+封闭局域网只能通过 IP 访问时，使用仓库提供的脚本生成独立局域网 CA 和包含 IP SAN 的服务器证书。脚本必须以 `robot` 用户运行，不要使用 `sudo`：
+
+```bash
+cd /home/robot/eai-teleop-studio
+bash scripts/setup_hand_web_lan_tls.sh \
+  --ip 192.168.60.60 \
+  --dns robot.local \
+  --force
+
+sudo bash scripts/install_autostart_services.sh hand-web.service
+curl -k https://127.0.0.1:18089/api/status
+```
+
+脚本会生成：
+
+```text
+config/hand_web_ca.crt   # 交付给客户电脑的局域网根证书
+config/hand_web_ca.key   # CA 私钥，只保留在部署服务器
+config/cert.pem          # HTTPS 服务器证书
+config/key.pem           # HTTPS 服务器私钥
+config/hand_web.env      # hand-web HTTPS 环境配置
+```
+
+把 `hand_web_ca.crt` 和 `scripts/install_hand_web_ca_windows.ps1` 放入客户安装包。安装程序以客户确认后的当前 Windows 用户身份执行：
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\install_hand_web_ca_windows.ps1 `
+  -CertificatePath .\hand_web_ca.crt
+```
+
+安装证书后重启浏览器，直接访问 `https://192.168.60.60:18089/` 并授权摄像头。不得向客户分发 `hand_web_ca.key` 或 `key.pem`。如果相机服务也使用 `config/cert.pem` 和 `config/key.pem`，轮换证书后同步重启 `teleimager-camera-capture.service`。
+
+仅在浏览器警告页选择“继续访问”不属于可交付状态，也不保证 `getUserMedia` 可用。证书没有 SAN、SAN 与访问 IP/域名不一致，或根 CA 未受信任时，应修复证书部署，而不是让客户关闭浏览器安全策略。
 
 ### 查找强脑 USB 串口
 
@@ -152,19 +191,48 @@ cp -a hand_web/poses.json hand_web/vision_calibration.json \
   /home/robot/hand-web-backup/ 2>/dev/null || true
 ```
 
-在原目录通过 Git 更新时：
+先检查部署目录是否有服务器现场修改：
 
 ```bash
 cd /home/robot/eai-teleop-studio
+git status --short
+```
+
+工作区干净时可直接执行 `git pull --ff-only`。若证书、摄像头配置或之前临时修复过的代码显示为已修改，不要使用 `git reset --hard`；先完整暂存，再更新并只恢复服务器专属配置：
+
+```bash
+cd /home/robot/eai-teleop-studio
+git stash push --include-untracked \
+  -m "server-before-update-$(date +%F-%H%M%S)"
 git pull --ff-only
+
+git restore --source='stash@{0}' -- \
+  config/cert.pem \
+  config/key.pem \
+  config/web_console.json \
+  teleop/teleimager/cam_config_server.yaml
+```
+
+服务器上曾通过 Windows 工具复制的 Python 文件可能混合 CRLF/LF 行尾，Git 会把整份文件显示为修改。可在更新前用下面的命令确认是否只有行尾差异；没有输出表示实际代码与远端一致，不需要从 stash 恢复这些 Python 文件：
+
+```bash
+git diff --ignore-space-at-eol --stat origin/main -- \
+  teleop/robot_control/end_effectors.py \
+  teleop/robot_control/robot_hand_brainco.py \
+  teleop/robot_control/robot_hand_unitree.py \
+  teleop/teleop_hand_and_arm.py
+```
+
+更新代码后安装依赖并重启服务：
+
+```bash
 /home/robot/miniconda3/envs/teleop/bin/python3 -m pip install -r requirements.txt
 /home/robot/miniconda3/envs/teleop/bin/python3 -m pip install \
   -r hand_web/requirements-vision.txt
 sudo bash scripts/install_autostart_services.sh hand-web.service
-sudo systemctl restart hand-web.service
 ```
 
-重新安装服务文件后仍需显式执行 `systemctl restart`，因为 `enable --now` 不会重启一个已经处于运行状态的服务。不要使用会删除未跟踪文件的清理命令，否则可能删除 `hand_web/poses.json` 和 `hand_web/vision_calibration.json`。
+安装脚本会在写入 unit 并执行 `daemon-reload` 后主动重启所选服务，确保 `config/hand_web.env` 的 HTTP/HTTPS修改立即生效。安全 stash 建议保留到服务验证完成；确认不再需要现场备份后再执行 `git stash drop stash@{0}`。不要使用会删除未跟踪文件的清理命令，否则可能删除 `hand_web/poses.json` 和 `hand_web/vision_calibration.json`。
 
 更新完成后验证：
 
@@ -232,6 +300,8 @@ curl -s http://127.0.0.1:18089/api/vision/status
 | `Failed to open Modbus context: Permission denied` | `robot` 不在 `dialout`，或服务尚未重启获取新组权限 | `sudo usermod -aG dialout robot` 后重启 `hand-web.service` |
 | `read_holding_registers ... timeout` | 选错 FT2232 通道、设备 ID 不正确、设备未供电或链路异常 | 优先测试 `/dev/ttyUSB1`，再测试 `/dev/ttyUSB0`，Revo2 默认设备 ID 为 `127` |
 | `Device or resource busy` / `拒绝访问` | 串口被官方上位机、遥操或另一份调试服务占用 | 使用 `fuser` 查找占用者，正常停止后再连接 |
+| `[Errno 98] Address already in use` | 旧的手工进程仍在监听，或服务器仍使用不允许 Linux 立即复用监听地址的旧版代码 | 用 `ss -ltnp 'sport = :18089'` 对比 `systemctl show hand-web.service -p MainPID`；PID 不同则正常停止旧进程，PID 相同且服务为 `active` 表示日志是之前重试留下的历史记录；若每次重启都等待约一分钟，更新 `hand_web/server.py` 后再重启 |
+| HTTPS 连接超时，但 `ss` 显示 `18089` 正在监听 | 旧版服务在监听线程中同步执行 TLS 握手，一个未完成握手的客户端会阻塞后续连接 | 更新 `hand_web/server.py` 并重启服务；新版会在线程中处理 TLS 握手、设置连接超时，并将监听队列扩大到 32 |
 | 页面可访问但无法控制 | Web 服务正常不代表 USB 或 DDS 链路正常 | 检查 `/api/status`、设备节点、用户组和业务日志 |
 | 浏览器提示需要 HTTPS | 通过远程 HTTP 地址访问，浏览器拒绝摄像头 API | 使用 HTTPS，或通过 SSH 转发访问 `http://127.0.0.1:18089` |
 | 浏览器拒绝摄像头 | 页面权限被禁止，或访问页面的电脑没有可用摄像头 | 在浏览器站点权限中允许摄像头 |
@@ -240,6 +310,10 @@ curl -s http://127.0.0.1:18089/api/vision/status
 服务启动只提供 Web 页面，不会自动连接串口或发送手势。连接仍由页面操作触发。官方上位机、遥操与本工具不能同时控制同一只灵巧手；切换控制程序前应先在页面断开设备。
 
 同一项目目录启用了跨端口单实例锁。即使指定不同的 HTTP 端口，也不能同时启动两份 `hand_web`，以免两个页面争用同一串口。出现“已有灵巧手调试服务运行”时，应使用正在运行的页面或先停止旧进程，不要通过更换端口绕过检查。
+
+当前监听实现会在 Linux 上启用 `SO_REUSEADDR`，使旧连接进入 `TIME_WAIT` 后 systemd 仍能立即重新绑定 `18089`；Windows 继续使用 `SO_EXCLUSIVEADDRUSE`。这不会允许两份服务同时启动，进程级单实例锁和内核监听冲突检查仍然生效。
+
+`hand-web.service` 使用 `SIGTERM` 停止进程。因时 DDS 初始化后会创建底层通信线程，使用 Python 的 `SIGINT` 清理路径可能在解释器释放 DDS 对象时阻塞，最终触发 `TimeoutStopSec` 并使重启失败；`SIGTERM` 会由操作系统统一回收 Web socket、DDS 线程和串口描述符，不会停止独立运行的 `inspire-dfx.service`。
 
 视觉控制默认由浏览器通过 `getUserMedia` 打开访问页面这台电脑的摄像头，按比例压缩为 JPEG 后上传到 `hand_web`，服务端继续负责 MediaPipe 识别、标定、关节映射、滤波和设备控制。上传队列只保留最新画面，不会因网络抖动积压旧帧；页面关闭、停止上传或手部持续丢失时，服务会停止当前运动并释放控制权。
 
@@ -372,10 +446,19 @@ cd /home/robot
 git clone https://github.com/unitreerobotics/DFX_inspire_service.git
 
 PROJECT_ROOT=/home/robot/eai-teleop-studio
-if ! grep -q 'find_package(fmt REQUIRED)' DFX_inspire_service/CMakeLists.txt; then
-  git -C DFX_inspire_service apply \
-    "$PROJECT_ROOT/patches/inspire_dfx_ubuntu22_fmt.patch"
-fi
+for DFX_PATCH in \
+  "$PROJECT_ROOT/patches/inspire_dfx_ubuntu22_fmt.patch" \
+  "$PROJECT_ROOT/patches/inspire_dfx_configurable_ids.patch"; do
+  if git -C DFX_inspire_service apply --check "$DFX_PATCH" 2>/dev/null; then
+    git -C DFX_inspire_service apply "$DFX_PATCH"
+    echo "Applied $DFX_PATCH"
+  elif git -C DFX_inspire_service apply --reverse --check "$DFX_PATCH" 2>/dev/null; then
+    echo "Already applied; skipping $DFX_PATCH"
+  else
+    echo "ERROR: DFX source is incompatible with $DFX_PATCH" >&2
+    exit 1
+  fi
+done
 
 cmake -S DFX_inspire_service \
   -B DFX_inspire_service/build \
@@ -384,7 +467,7 @@ cmake --build DFX_inspire_service/build --target inspire_h1 -j"$(nproc)"
 test -x /home/robot/DFX_inspire_service/build/inspire_h1
 ```
 
-Ubuntu 22.04 的 `spdlog` 使用外部 `fmt`。若链接阶段出现大量 `undefined reference to fmt::v8`，说明官方 DFX 的 CMake 没有链接这两个库；上面的仓库补丁会增加 `find_package(fmt/spdlog)` 及 `spdlog::spdlog`、`fmt::fmt` 链接。重复部署时可用下面的命令确认补丁是否已经应用：
+Ubuntu 22.04 的 `spdlog` 使用外部 `fmt`。若链接阶段出现大量 `undefined reference to fmt::v8`，说明官方 DFX 的 CMake 没有链接这两个库；第一个补丁会增加 `find_package(fmt/spdlog)` 及 `spdlog::spdlog`、`fmt::fmt` 链接。第二个补丁为官方程序增加可配置的左右手串口 ID，并在成功读取后清零 DDS `lost`，避免断开的手继续显示旧关节值。补丁不是重复应用型操作：直接执行第二次 `git apply` 会显示“补丁未应用”，表示目标改动已经存在，并不表示编译失败。上面的三态判断可以安全重复执行。
 
 ```bash
 grep -nE 'find_package\((fmt|spdlog)|spdlog::spdlog|fmt::fmt' \
@@ -405,21 +488,114 @@ ip -br link show enp86s0
   --network-interface enp86s0 --side right --command state
 ```
 
-仅当因时串口与 Web 服务位于同一台机器时，可创建环境文件并安装仓库提供的串口桥服务：
+### DFX 串口桥开机自启
+
+仅当因时串口与本项目位于同一台机器时，安装仓库提供的串口桥服务。先复制机器专属环境文件并确认稳定串口路径：
 
 ```bash
-cat > config/inspire_dfx.env <<'EOF'
-DDS_IFACE=enp86s0
-HAND_SERIAL=/dev/serial/by-path/<因时设备物理路径>
-INSPIRE_DFX_SERVICE=/home/robot/DFX_inspire_service/build/inspire_h1
-EOF
+cd /home/robot/eai-teleop-studio
+cp config/inspire_dfx.env.example config/inspire_dfx.env
 
-sudo bash scripts/install_autostart_services.sh inspire-dfx.service hand-web.service
+ls -l /dev/serial/by-id /dev/serial/by-path 2>/dev/null
+vi config/inspire_dfx.env
+```
+
+`config/inspire_dfx.env` 是服务器专属配置并已加入 `.gitignore`。当前 CH340 的典型配置为：
+
+```text
+DDS_IFACE=enp86s0
+HAND_SERIAL=/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
+INSPIRE_DFX_SERVICE=/home/robot/DFX_inspire_service/build/inspire_h1
+INSPIRE_DFX_RIGHT_ID=1
+INSPIRE_DFX_LEFT_ID=2
+```
+
+设备 ID 与物理安装侧必须按实际设备配置，不能仅根据默认值判断。`0` 表示禁用该侧：
+
+```text
+# 单只物理左手，串口应答 ID 1
+INSPIRE_DFX_RIGHT_ID=0
+INSPIRE_DFX_LEFT_ID=1
+
+# 单只物理右手，串口应答 ID 1
+INSPIRE_DFX_RIGHT_ID=1
+INSPIRE_DFX_LEFT_ID=0
+
+# 官方默认双手
+INSPIRE_DFX_RIGHT_ID=1
+INSPIRE_DFX_LEFT_ID=2
+```
+
+桥接程序会把 `INSPIRE_DFX_RIGHT_ID` 发布到 DDS 关节 `0-5`，把 `INSPIRE_DFX_LEFT_ID` 发布到 `6-11`。因此物理左手即使使用 ID `1`，也必须配置为 `LEFT_ID=1`；否则网页选择左手时会把指令发给错误的串口 ID。
+
+安装前使用与 systemd 相同的 `robot` 用户做预检。手工启动时需要先加载环境文件；`--dry-run` 只解析程序、串口和网卡，不会发送动作：
+
+```bash
+set -a
+source config/inspire_dfx.env
+set +a
+
+/home/robot/miniconda3/envs/teleop/bin/python3 \
+  tools/start_inspire_dfx_service.py --no-sudo --dry-run
+```
+
+`--dry-run` 只能确认串口节点和启动参数存在，不能证明实体手已经应答。若页面能够连接 DDS 但手不动作，停止串口桥后执行只读 ID 探测：
+
+```bash
+sudo systemctl stop inspire-dfx.service hand-web.service
+
+/home/robot/miniconda3/envs/teleop/bin/python3 \
+  tools/inspire_dfx_serial_probe.py \
+  --device /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 \
+  --ids 1 2 3 4 5 6 7 8 9 10
+```
+
+官方默认右手为 ID `1`，左手为 ID `2`，但设备烧录 ID 可能与物理安装侧不同，应以探测结果和实物安装侧填写 `INSPIRE_DFX_RIGHT_ID/LEFT_ID`。出现 `online` 才表示灵巧手本体返回了有效位置帧；只有 `/dev/ttyUSB*` 或 CH340 出现在 `lsusb` 中，仅能证明 USB 转串口板在线。所有 ID 都显示 `offline` 时，应检查灵巧手供电、串口/RS485 线束、A/B 极性、手型与通信接口，不要继续从 Web 端反复发送动作。检查完成后重新启动：
+
+设备在线但某个关节不动作时，增加 `--diagnostics` 读取六路关节的目标位置、实际位置、电流、状态、故障位和温度。该命令只读，不会发送动作或清除故障：
+
+```bash
+/home/robot/miniconda3/envs/teleop/bin/python3 \
+  tools/inspire_dfx_serial_probe.py \
+  --device /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 \
+  --ids 1 \
+  --diagnostics
+```
+
+`status=target_reached` 且 `errors=[]` 表示该路正常到位；`current_protection`、`locked_rotor` 或 `actuator_fault` 表示执行器已进入保护。`errors` 会进一步显示 `over_current`、`over_temperature`、`motor_abnormal`、`communication` 等原因。先断开动作源并检查机构受阻、线束和供电，再按因时手册处理故障；不要在原因未排除时反复执行姿态或直接清除故障。
+
+诊断程序会独占串口，必须先停止 `inspire-dfx.service`。诊断期间也停止 `hand-web.service`，避免页面继续通过 DDS 发送动作。检查完成后重新启动：
+
+```bash
+sudo systemctl start inspire-dfx.service hand-web.service
+```
+
+安装并启用开机自启：
+
+```bash
+sudo bash scripts/install_autostart_services.sh inspire-dfx.service
+```
+
+安装脚本会设置开机自启并立即重启服务。验证服务、进程和日志：
+
+```bash
+systemctl is-enabled inspire-dfx.service
+systemctl is-active inspire-dfx.service
+systemctl status inspire-dfx.service --no-pager
+pgrep -af inspire_h1
+tail -f /home/robot/eai-teleop-studio/logs/app/inspire-dfx.service.log
+```
+
+确认 DFX 状态主题正常后，再安装或重启 Web 服务：
+
+```bash
+sudo bash scripts/install_autostart_services.sh hand-web.service
+
 systemctl status inspire-dfx.service hand-web.service --no-pager
 tail -f logs/app/inspire-dfx.service.log logs/system/hand_web_$(date +%F).log
 ```
 
-`HAND_SERIAL` 优先使用 `/dev/serial/by-id`；无序列号的 CH340 使用 `/dev/serial/by-path`。重新插拔后 `/dev/ttyUSB0` 可能变化，而稳定链接通常不变。因时串口桥、遥操和其他串口程序不能同时直接占用该设备。
+`HAND_SERIAL` 优先使用 `/dev/serial/by-id`；无序列号的 CH340 使用 `/dev/serial/by-path`。重新插拔后 `/dev/ttyUSB0` 可能变化，而稳定链接通常不变。`StartLimitIntervalSec=0` 允许开机时串口暂未出现的服务持续重试；服务用户通过 `SupplementaryGroups=dialout` 获得串口权限。因时串口桥、遥操和其他串口程序不能同时直接占用该设备。
 
 ## 增加设备
 

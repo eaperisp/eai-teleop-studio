@@ -125,6 +125,7 @@ class _InspireAdapterBase:
     transport_description = ""
     sdk_type: type[Any]
     raw_scale = 1.0
+    command_burst_seconds = 0.0
 
     def __init__(self) -> None:
         self._sdk: Any = None
@@ -172,6 +173,8 @@ class _InspireAdapterBase:
         }
 
     def disconnect(self) -> dict[str, Any]:
+        if self._sdk is not None and hasattr(self._sdk, "cancel_command_burst"):
+            self._sdk.cancel_command_burst()
         self._sdk = None
         self._connected = False
         self._enabled_sides = ()
@@ -214,7 +217,16 @@ class _InspireAdapterBase:
         side = validate_side(side)
         self._require_side(side)
         normalized = normalize_positions(positions, HAND_DOF)
-        self._sdk.command(side, self._to_hardware(normalized))
+        hardware_positions = self._to_hardware(normalized)
+        if self.command_burst_seconds > 0.0 and hasattr(self._sdk, "command_burst"):
+            self._sdk.command_burst(
+                side,
+                hardware_positions,
+                duration=self.command_burst_seconds,
+                rate=20.0,
+            )
+        else:
+            self._sdk.command(side, hardware_positions)
         self._targets[side] = normalized[:]
         self._command_active[side] = True
         return {
@@ -234,7 +246,16 @@ class _InspireAdapterBase:
         for side in active:
             state = self._states.get(side)
             if state is not None:
-                self._sdk.command(side, self._to_hardware(state[0]))
+                hardware_positions = self._to_hardware(state[0])
+                if self.command_burst_seconds > 0.0 and hasattr(self._sdk, "command_burst"):
+                    self._sdk.command_burst(
+                        side,
+                        hardware_positions,
+                        duration=self.command_burst_seconds,
+                        rate=20.0,
+                    )
+                else:
+                    self._sdk.command(side, hardware_positions)
                 self._targets[side] = state[0][:]
                 held.append(side)
             self._command_active[side] = False
@@ -246,10 +267,19 @@ class _InspireAdapterBase:
         try:
             raw_states = self._sdk.read_states(timeout=timeout)
             timestamp = time.time()
+            offline = []
             for side, state in raw_states.items():
-                if state is not None:
+                lost = tuple(getattr(state, "lost", ())) if state is not None else ()
+                if state is not None and not any(lost):
                     self._states[side] = (self._from_hardware(state.angles), timestamp)
-            self._error = ""
+                else:
+                    self._states[side] = None
+                    offline.append(side)
+            self._error = (
+                "因时串口未收到" + "、".join("左手" if side == "left" else "右手" for side in offline) + "反馈"
+                if offline
+                else ""
+            )
         except Exception as exc:
             self._error = f"读取因时手状态失败: {exc}"
 
@@ -285,6 +315,7 @@ class InspireDFXAdapter(_InspireAdapterBase):
     transport_description = "通过 inspire_h1 串口服务发布的 rt/inspire/cmd 与 rt/inspire/state 控制"
     sdk_type = InspireDFXHandSDK
     raw_scale = 1.0
+    command_burst_seconds = 0.5
 
 
 class InspireFTPAdapter(_InspireAdapterBase):

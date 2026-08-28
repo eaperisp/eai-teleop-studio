@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-import subprocess
 import sys
 
 
@@ -18,6 +17,13 @@ DEFAULT_DFX_SERIAL_HINTS = (
     "CH340",
     "CH341",
 )
+
+
+def hand_id(value: str) -> int:
+    parsed = int(value)
+    if not 0 <= parsed <= 247:
+        raise argparse.ArgumentTypeError("hand ID must be between 0 (disabled) and 247")
+    return parsed
 
 
 def existing_path(raw_path: str | None) -> Path | None:
@@ -94,6 +100,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--serial", default=None, help="Stable serial path, preferably /dev/serial/by-id/...")
     parser.add_argument("--serial-match", default=None, help="Substring used to filter serial candidates.")
     parser.add_argument("--network", default=os.getenv("DDS_IFACE"), required=os.getenv("DDS_IFACE") is None)
+    parser.add_argument(
+        "--right-id",
+        type=hand_id,
+        default=hand_id(os.getenv("INSPIRE_DFX_RIGHT_ID", "1")),
+        help="Serial device ID published as the DDS right hand; 0 disables it.",
+    )
+    parser.add_argument(
+        "--left-id",
+        type=hand_id,
+        default=hand_id(os.getenv("INSPIRE_DFX_LEFT_ID", "2")),
+        help="Serial device ID published as the DDS left hand; 0 disables it.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print the resolved command without starting it.")
     parser.add_argument(
         "--no-sudo",
@@ -109,19 +127,36 @@ def main() -> int:
     if not service.exists():
         raise FileNotFoundError(f"service binary does not exist: {service}")
 
+    if args.left_id == 0 and args.right_id == 0:
+        raise ValueError("at least one Inspire hand ID must be enabled")
+    if args.left_id != 0 and args.left_id == args.right_id:
+        raise ValueError("left and right hand IDs must differ unless one side is disabled")
+
     serial = resolve_serial(args)
-    command = [str(service), "-s", str(serial), "--network", args.network]
+    command = [
+        str(service),
+        "-s",
+        str(serial),
+        "--network",
+        args.network,
+        "--right-id",
+        str(args.right_id),
+        "--left-id",
+        str(args.left_id),
+    ]
     if not args.no_sudo and os.geteuid() != 0:
         command = ["sudo", *command]
 
     print(f"Resolved serial: {serial}")
     print(f"DDS network: {args.network}")
+    print(f"Hand IDs: right={args.right_id or 'disabled'}, left={args.left_id or 'disabled'}")
     print("Command:", " ".join(command))
 
     if args.dry_run:
         return 0
 
-    return subprocess.call(command)
+    os.execvp(command[0], command)
+    return 0
 
 
 if __name__ == "__main__":

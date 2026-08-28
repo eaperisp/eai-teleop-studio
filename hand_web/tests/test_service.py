@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import os
+import socket
+import ssl
 import tempfile
+import threading
+import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.request import urlopen
 from unittest.mock import patch
 
 from hand_web.core.service import HandControlService
 from hand_web.adapters.inspire import InspireDFXAdapter, InspireFTPAdapter
-from hand_web.server import SingleInstanceLock, validate_hand_web_port
+from hand_web.server import ExclusiveThreadingHTTPServer, SingleInstanceLock, validate_hand_web_port
 from teleop.robot_control.devices.base import normalize_positions
 from teleop.robot_control.devices.brainco import BraincoHandSDK
 from teleop.robot_control.devices.brainco.dds_transport import BraincoDDSTransport
@@ -72,18 +79,21 @@ class FakeModbusClient:
 
 
 class FakeInspireState:
-    def __init__(self, side, angles):
+    def __init__(self, side, angles, lost=None):
         self.side = side
         self.angles = tuple(angles)
+        self.lost = tuple(lost or [0] * 6)
 
 
 class FakeInspireSDK:
     state_angles = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    state_lost = [0] * 6
 
     def __init__(self, **options):
         self.options = options
         self.initialized = False
         self.commands = []
+        self.bursts = []
 
     def initialize(self):
         self.initialized = True
@@ -92,9 +102,9 @@ class FakeInspireSDK:
         del timeout
         result = {}
         if self.options["enable_left"]:
-            result["left"] = FakeInspireState("left", self.state_angles)
+            result["left"] = FakeInspireState("left", self.state_angles, self.state_lost)
         if self.options["enable_right"]:
-            result["right"] = FakeInspireState("right", self.state_angles)
+            result["right"] = FakeInspireState("right", self.state_angles, self.state_lost)
         return result
 
     def command(self, side, angles):
@@ -102,10 +112,19 @@ class FakeInspireSDK:
         self.commands.append((side, values))
         return values
 
+    def command_burst(self, side, angles, duration=0.4, rate=20.0):
+        values = self.command(side, angles)
+        self.bursts.append((side, values, duration, rate))
+        return values
+
+    def cancel_command_burst(self):
+        return None
+
 
 class FakeDDSMotor:
-    def __init__(self, q):
+    def __init__(self, q, lost=0):
         self.q = q
+        self.lost = lost
 
 
 class FakeDDSState:
@@ -121,6 +140,19 @@ class FakeDDSSubscriber:
         del timeout
         self.read_count += 1
         return FakeDDSState()
+
+
+class FakeDDSPublisher:
+    def __init__(self):
+        self.writes = []
+
+    def Write(self, message):
+        self.writes.append([command.q for command in message.cmds])
+
+
+class FakeDDSCommandMessage:
+    def __init__(self):
+        self.cmds = [FakeDDSMotor(1.0) for _ in range(12)]
 
 
 class HandControlServiceTests(unittest.TestCase):
@@ -154,6 +186,15 @@ class HandControlServiceTests(unittest.TestCase):
         })
         self.assertTrue(result["ok"])
         self.assertTrue(self.service.status()["connected"])
+
+        adapter = self.service._adapter
+        repeated = self.service.connect({
+            "device_id": "brainco_revo2",
+            "transport": "modbus",
+            "options": {"side": "right"},
+        })
+        self.assertTrue(repeated["reused"])
+        self.assertIs(self.service._adapter, adapter)
 
         command = self.service.command({
             "side": "right",
@@ -218,6 +259,58 @@ class HandControlServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "数据同步服务"):
             validate_hand_web_port(18090)
 
+    @unittest.skipIf(os.name == "nt", "Windows uses SO_EXCLUSIVEADDRUSE")
+    def test_http_port_can_be_rebound_immediately_after_shutdown(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, _format, *args):
+                del args
+
+        server = ExclusiveThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
+                self.assertEqual(response.status, 204)
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+
+        rebound = ExclusiveThreadingHTTPServer(("127.0.0.1", port), Handler)
+        rebound.server_close()
+
+    def test_http_connections_have_a_bounded_read_timeout(self):
+        class Handler(BaseHTTPRequestHandler):
+            pass
+
+        server = ExclusiveThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        client = socket.create_connection(server.server_address, timeout=2)
+        request = None
+        try:
+            request, _client_address = server.get_request()
+            self.assertEqual(request.gettimeout(), server.request_timeout_seconds)
+        finally:
+            if request is not None:
+                request.close()
+            client.close()
+            server.server_close()
+
+    def test_expected_tls_disconnect_does_not_print_a_traceback(self):
+        server = ExclusiveThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        try:
+            error = ssl.SSLError("certificate unknown")
+            with patch("hand_web.server.sys.exc_info", return_value=(ssl.SSLError, error, None)):
+                with patch.object(ThreadingHTTPServer, "handle_error") as inherited:
+                    server.handle_error(None, ("127.0.0.1", 12345))
+            inherited.assert_not_called()
+        finally:
+            server.server_close()
+
 
 class BraincoModelTests(unittest.TestCase):
     @patch.object(BraincoModbusTransport, "_load_sdk")
@@ -268,6 +361,21 @@ class BraincoModelTests(unittest.TestCase):
 
 
 class InspireAdapterTests(unittest.TestCase):
+    def test_dfx_command_burst_republishes_latest_target(self):
+        sdk = InspireDFXHandSDK(enable_left=True, enable_right=True)
+        publisher = FakeDDSPublisher()
+        sdk._initialized = True
+        sdk._state_synced = True
+        sdk._publisher = publisher
+        sdk._cmd_msg = FakeDDSCommandMessage()
+
+        sdk.command_burst("left", [0.25] * 6, duration=0.06, rate=50.0)
+        time.sleep(0.09)
+
+        self.assertGreaterEqual(len(publisher.writes), 3)
+        self.assertEqual(publisher.writes[-1][:6], [1.0] * 6)
+        self.assertEqual(publisher.writes[-1][6:], [0.25] * 6)
+
     def test_dfx_reads_one_aggregate_sample_for_both_hands(self):
         sdk = InspireDFXHandSDK(enable_left=True, enable_right=True)
         subscriber = FakeDDSSubscriber()
@@ -279,6 +387,18 @@ class InspireAdapterTests(unittest.TestCase):
         self.assertEqual(subscriber.read_count, 1)
         self.assertEqual(states["right"].angles, (0.0, 0.1, 0.2, 0.3, 0.4, 0.5))
         self.assertEqual(states["left"].angles, (0.6, 0.7, 0.8, 0.9, 1.0, 1.1))
+        self.assertEqual(states["left"].lost, (0, 0, 0, 0, 0, 0))
+
+    def test_dfx_lost_feedback_is_reported_offline(self):
+        with patch.object(InspireDFXAdapter, "sdk_type", FakeInspireSDK):
+            with patch.object(FakeInspireSDK, "state_lost", [3] * 6):
+                adapter = InspireDFXAdapter()
+                adapter.connect("dds", {"sides": "left"})
+                status = adapter.status()
+
+        self.assertFalse(status["hands"]["left"]["online"])
+        self.assertIsNone(status["hands"]["left"]["positions"])
+        self.assertIn("左手", status["error"])
 
     def test_dfx_mapping_uses_web_order_and_open_closed_convention(self):
         with patch.object(InspireDFXAdapter, "sdk_type", FakeInspireSDK):
@@ -288,6 +408,7 @@ class InspireAdapterTests(unittest.TestCase):
 
         self.assertEqual(result["positions"], [0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
         self.assertEqual(adapter._sdk.commands[-1], ("right", [0.5, 0.6, 0.7, 0.8, 1.0, 0.9]))
+        self.assertEqual(adapter._sdk.bursts[-1][2:], (0.5, 20.0))
         self.assertEqual(
             adapter.status()["hands"]["right"]["positions"],
             [0.5, 0.4, 0.6, 0.7, 0.8, 0.9],

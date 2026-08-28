@@ -36,6 +36,12 @@ tar \
   --exclude="${PROJECT_NAME}/node_modules" \
   --exclude="${PROJECT_NAME}/hand_web/node_modules" \
   --exclude="${PROJECT_NAME}/teleop_web/static/__pycache__" \
+  --exclude="${PROJECT_NAME}/config/cert.pem" \
+  --exclude="${PROJECT_NAME}/config/key.pem" \
+  --exclude="${PROJECT_NAME}/config/hand_web_ca.crt" \
+  --exclude="${PROJECT_NAME}/config/hand_web_ca.key" \
+  --exclude="${PROJECT_NAME}/config/hand_web_ca.srl" \
+  --exclude="${PROJECT_NAME}/config/hand_web.env" \
   -czf "${ARCHIVE}" \
   "${PROJECT_NAME}"
 

@@ -11,6 +11,7 @@ const state = {
   liveTimer: null,
   pendingCommands: new Set(),
   stopping: false,
+  refreshingJoints: false,
   initializedFromState: new Set(),
   poses: [],
   editingPoseId: null,
@@ -51,17 +52,28 @@ function toast(message, tone = '') {
   element.hideTimer = setTimeout(() => { element.className = 'toast'; }, 2600);
 }
 
-async function request(path, body) {
-  const options = { cache: 'no-store' };
+async function request(path, body, timeoutMs = path === '/api/connect' ? 15000 : 8000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const options = { cache: 'no-store', signal: controller.signal };
   if (body !== undefined) {
     options.method = 'POST';
     options.headers = { 'Content-Type': 'application/json' };
     options.body = JSON.stringify(body);
   }
-  const response = await fetch(path, options);
-  const payload = await response.json();
-  if (!response.ok || payload.ok === false) throw new Error(payload.error || '请求失败');
-  return payload;
+  try {
+    const response = await fetch(path, options);
+    const payload = await response.json();
+    if (!response.ok || payload.ok === false) throw new Error(payload.error || '请求失败');
+    return payload;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒），请检查服务是否运行`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function currentTransport() {
@@ -88,10 +100,11 @@ function cancelLiveTimer() {
 
 function updateControlAvailability() {
   const manualLocked = state.vision.starting || state.vision.running || state.vision.stopping;
-  const ready = state.connected && targetReady() && !state.stopping && !manualLocked;
+  const ready = state.connected && targetReady() && !state.stopping && !state.refreshingJoints && !manualLocked;
   $('sendButton').disabled = !ready;
   $('stopButton').disabled = !state.connected || state.stopping || manualLocked;
   $('liveToggle').disabled = !ready;
+  $('refreshJointsButton').disabled = !state.connected || state.stopping || state.refreshingJoints || manualLocked;
   $('connectButton').disabled = state.connected || manualLocked;
   $('disconnectButton').disabled = !state.connected || manualLocked;
   $('deviceSelect').disabled = state.connected || manualLocked;
@@ -176,8 +189,9 @@ function renderTransport() {
     label.append(caption, input);
     $('connectionFields').append(label);
   });
-  $('durationField').classList.toggle('disabled', !transport?.supports_duration);
-  $('durationInput').disabled = !transport?.supports_duration;
+  const supportsDuration = transport?.supports_duration === true;
+  $('durationField').hidden = !supportsDuration;
+  $('durationInput').disabled = !supportsDuration;
 }
 
 function connectionOptions() {
@@ -246,6 +260,7 @@ function updateActualMarkers() {
   const actual = state.actual[state.activeSide];
   if (!actual) {
     document.querySelectorAll('[data-joint-actual]').forEach((output) => { output.textContent = '--'; });
+    document.querySelectorAll('.actual-track i').forEach((marker) => { marker.classList.add('hidden'); });
     return;
   }
   document.querySelectorAll('.actual-track i').forEach((marker, index) => {
@@ -276,6 +291,8 @@ function updateHandPreview() {
 
 function renderPoseLibrary() {
   if (!state.device) return;
+  const live = $('liveToggle').checked;
+  $('poseLibraryHint').textContent = live ? '实时发送已开启，点击后立即执行' : '载入后由“执行姿态”确认发送';
   if (!state.poses.length) {
     $('poseList').innerHTML = '<div class="pose-empty">暂无保存的姿态</div>';
   } else {
@@ -286,7 +303,7 @@ function renderPoseLibrary() {
           <span>${escapeHtml(pose.name_en)}</span>
         </div>
         <div class="pose-actions">
-          <button class="pose-command" type="button" data-pose-action="apply" data-pose-id="${escapeHtml(pose.id)}">载入</button>
+          <button class="pose-command" type="button" data-pose-action="apply" data-pose-id="${escapeHtml(pose.id)}">${live ? '执行' : '载入'}</button>
           <button class="icon-button pose-icon" type="button" data-pose-action="edit" data-pose-id="${escapeHtml(pose.id)}" title="编辑姿态" aria-label="编辑姿态">&#9998;</button>
           <button class="icon-button pose-icon danger-icon" type="button" data-pose-action="delete" data-pose-id="${escapeHtml(pose.id)}" title="删除姿态" aria-label="删除姿态">&times;</button>
         </div>
@@ -332,14 +349,19 @@ function closePoseDialog() {
   $('poseDialog').close();
 }
 
-function handlePoseAction(action, poseId) {
+async function handlePoseAction(action, poseId) {
   const pose = state.poses.find((item) => item.id === poseId);
   if (!pose) return;
   if (action === 'apply') {
+    cancelLiveTimer();
     state.values[state.activeSide] = pose.positions.slice();
     renderJoints();
     log(`已载入姿态：${pose.description_zh}`);
-    toast('姿态已载入，请确认后执行');
+    if ($('liveToggle').checked) {
+      await sendCommand();
+    } else {
+      toast('姿态已载入，请确认后执行');
+    }
   } else if (action === 'edit') {
     openPoseDialog(pose);
   } else if (action === 'delete') {
@@ -723,12 +745,15 @@ async function sendCommand(silent = false) {
     }
     return;
   }
-  const operation = request('/api/command', {
+  const payload = {
     side: state.activeSide,
     positions: target,
-    duration_ms: Number($('durationInput').value),
     continuous: silent,
-  });
+  };
+  if (currentTransport()?.supports_duration === true) {
+    payload.duration_ms = Number($('durationInput').value);
+  }
+  const operation = request('/api/command', payload);
   state.pendingCommands.add(operation);
   try {
     const result = await operation;
@@ -741,6 +766,32 @@ async function sendCommand(silent = false) {
     toast(error.message, 'error');
   } finally {
     state.pendingCommands.delete(operation);
+  }
+}
+
+async function refreshJointState() {
+  if (!state.connected || state.refreshingJoints) return;
+  cancelLiveTimer();
+  state.refreshingJoints = true;
+  updateControlAvailability();
+  try {
+    const status = await request('/api/status');
+    const hand = status.hands?.[state.activeSide];
+    if (!hand || hand.online === false || !Array.isArray(hand.positions)) {
+      throw new Error(`${state.activeSide === 'left' ? '左手' : '右手'}暂无有效关节反馈`);
+    }
+    state.actual[state.activeSide] = hand.positions.slice();
+    state.values[state.activeSide] = hand.positions.slice();
+    state.initializedFromState.add(state.activeSide);
+    renderJoints();
+    log(`已刷新${state.activeSide === 'left' ? '左手' : '右手'}当前关节`, 'success');
+    toast('当前关节数据已刷新');
+  } catch (error) {
+    log(`刷新关节失败：${error.message}`, 'error');
+    toast(error.message, 'error');
+  } finally {
+    state.refreshingJoints = false;
+    updateControlAvailability();
   }
 }
 
@@ -791,6 +842,10 @@ async function pollStatus() {
           state.initializedFromState.add(side);
           if (side === state.activeSide) shouldRender = true;
         }
+      } else {
+        state.actual[side] = null;
+        state.initializedFromState.delete(side);
+        if (side === state.activeSide) shouldRender = true;
       }
     });
     $('statusDot').className = `status-dot ${Object.values(status.hands || {}).some((hand) => hand.online) ? 'online' : 'waiting'}`;
@@ -837,6 +892,8 @@ $('connectButton').addEventListener('click', connectDevice);
 $('disconnectButton').addEventListener('click', disconnectDevice);
 $('sendButton').addEventListener('click', () => sendCommand());
 $('stopButton').addEventListener('click', stopMotion);
+$('refreshJointsButton').addEventListener('click', refreshJointState);
+$('liveToggle').addEventListener('change', renderPoseLibrary);
 $('startVisionButton').addEventListener('click', startVision);
 $('stopVisionButton').addEventListener('click', stopVision);
 $('fullscreenVisionButton').addEventListener('click', toggleVisionFullscreen);

@@ -1,0 +1,138 @@
+diff --git a/include/param.h b/include/param.h
+index 45dde73..c780796 100644
+--- a/include/param.h
++++ b/include/param.h
+@@ -15,6 +15,8 @@ inline std::string serial_port;
+ inline std::string network; 
+ inline std::string ns; 
+ inline float threhold;
++inline uint32_t right_id;
++inline uint32_t left_id;
+ 
+ po::variables_map helper(int argc, char** argv)
+ {
+@@ -30,6 +32,8 @@ po::variables_map helper(int argc, char** argv)
+     ("serial,s", po::value<std::string>(&serial_port)->default_value("/dev/ttyUSB0"), "serial port")
+     ("network", po::value<std::string>(&network)->default_value(""), "DDS network interface")
+     ("namespace", po::value<std::string>(&ns)->default_value("inspire"), "DDS topic namespace")
++    ("right-id", po::value<uint32_t>(&right_id)->default_value(1), "right hand serial ID; 0 disables this side")
++    ("left-id", po::value<uint32_t>(&left_id)->default_value(2), "left hand serial ID; 0 disables this side")
+     ;
+ 
+   po::variables_map vm;
+@@ -48,6 +52,22 @@ po::variables_map helper(int argc, char** argv)
+     exit(1);
+   }
+ 
++  if(right_id > 247 || left_id > 247)
++  {
++    spdlog::error("Hand serial IDs must be between 0 (disabled) and 247");
++    exit(1);
++  }
++  if(right_id == 0 && left_id == 0)
++  {
++    spdlog::error("At least one hand serial ID must be enabled");
++    exit(1);
++  }
++  if(right_id != 0 && right_id == left_id)
++  {
++    spdlog::error("Left and right hand serial IDs must differ unless one side is disabled");
++    exit(1);
++  }
++
+   return vm;
+ }
+ 
+diff --git a/inspire_h1.cpp b/inspire_h1.cpp
+index 07e398d..4d7cc92 100644
+--- a/inspire_h1.cpp
++++ b/inspire_h1.cpp
+@@ -13,8 +13,16 @@ public:
+     serial = std::make_shared<SerialPort>(param::serial_port, B115200);
+ 
+     // inspire
+-    righthand = std::make_shared<inspire::InspireHand>(serial, 1); // ID 1
+-    lefthand = std::make_shared<inspire::InspireHand>(serial, 2); // ID 2
++    if(param::right_id != 0)
++    {
++      righthand = std::make_shared<inspire::InspireHand>(serial, param::right_id);
++    }
++    if(param::left_id != 0)
++    {
++      lefthand = std::make_shared<inspire::InspireHand>(serial, param::left_id);
++    }
++    qcmd.setOnes();
++    qstate.setOnes();
+ 
+     // dds
+     handcmd = std::make_shared<unitree::robot::SubscriptionBase<unitree_go::msg::dds_::MotorCmds_>>(
+@@ -25,6 +33,11 @@ public:
+         "rt/" + param::ns + "/state");
+     handstate->msg_.states().resize(12);
+ 
++    for(int i(0); i<12; i++)
++    {
++      handstate->msg_.states()[i].lost() = 1;
++    }
++
+     // Start running
+     thread = std::make_shared<unitree::common::RecurrentThread>(
+       10000, std::bind(&InspireRunner::run, this)
+@@ -41,17 +54,27 @@ public:
+       {
+         qcmd(i) = handcmd->msg_.cmds()[i].q();
+       }
+-      righthand->SetPosition(qcmd.block<6, 1>(0, 0));
+-      lefthand->SetPosition(qcmd.block<6, 1>(6, 0));
++      if(righthand)
++      {
++        righthand->SetPosition(qcmd.block<6, 1>(0, 0));
++      }
++      if(lefthand)
++      {
++        lefthand->SetPosition(qcmd.block<6, 1>(6, 0));
++      }
+     }
+ 
+     // Recv state
+     Eigen::Matrix<double, 6, 1> qtemp;
+-    if(righthand->GetPosition(qtemp) == 0)
++    if(righthand && righthand->GetPosition(qtemp) == 0)
+     {
+       qstate.block<6, 1>(0, 0) = qtemp;
++      for(int i(0); i<6; i++)
++      {
++        handstate->msg_.states()[i].lost() = 0;
++      }
+     }
+-    else
++    else if(righthand)
+     {
+       for(int i(0); i<6; i++)
+       {
+@@ -58,11 +81,15 @@ public:
+       }
+       // spdlog::debug("Failed to get right hand state");
+     }
+-    if(lefthand->GetPosition(qtemp) == 0)
++    if(lefthand && lefthand->GetPosition(qtemp) == 0)
+     {
+       qstate.block<6, 1>(6, 0) = qtemp;
++      for(int i(0); i<6; i++)
++      {
++        handstate->msg_.states()[i+6].lost() = 0;
++      }
+     }
+-    else
++    else if(lefthand)
+     {
+       for(int i(0); i<6; i++)
+       {
+@@ -99,5 +126,7 @@ int main(int argc, char ** argv)
+   std::cout << " --- Unitree Robotics --- " << std::endl;
+   std::cout << "  Inspire Hand Controller  " << std::endl;
++  std::cout << "  Right serial ID: " << (param::right_id ? std::to_string(param::right_id) : "disabled") << std::endl;
++  std::cout << "  Left serial ID: " << (param::left_id ? std::to_string(param::left_id) : "disabled") << std::endl;
+ 
+   InspireRunner runner;
+  

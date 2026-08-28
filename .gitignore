@@ -19,6 +19,18 @@ __pycache__/
 # Runtime logs and process lock files
 logs/
 
+# Machine-specific Inspire DFX bridge configuration
+config/inspire_dfx.env
+
+# Machine-specific hand Web TLS configuration
+config/hand_web.env
+config/cert.pem
+config/key.pem
+config/hand_web_ca.crt
+config/hand_web_ca.key
+config/hand_web_ca.srl
+config/tls-backup-*/
+
 # Runtime hand pose library
 hand_web/poses.json
 hand_web/poses.json.tmp

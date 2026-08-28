@@ -25,6 +25,45 @@ const TRAINING_COMMAND_DEFAULTS = {
   saveInterval: '5000',
   keepPeriod: '25000',
 };
+const MOTOR_DEBUG_MODELS = [
+  {
+    id: 'dm-j4340-2ec-v11',
+    vendor: '达妙科技',
+    name: 'DM-J4340-2EC V1.1',
+    voltage: '24V',
+    voltageRange: '建议不低于15V / 不超过32V',
+    ratedTorque: 12,
+    peakTorque: 40,
+    ratedSpeedRpm: 36,
+    noLoadSpeedRpm: 56,
+    gearRatio: '40:1',
+    polePairs: 14,
+    weight: '~362g',
+    dimensions: '57 * 53.3mm',
+    protocol: 'CAN / CANFD',
+    encoder: '磁性双编码器',
+    defaultPmax: 12.5,
+    defaultVmax: 8,
+    defaultTmax: 40,
+    defaultTurnSpeed: 5,
+    defaultDirection: 'left',
+    defaultDurationSec: 60,
+    defaultControlHz: 50,
+    defaultTorque: 0,
+    defaultKd: 5.0,
+    kpRange: [0, 500],
+    kdRange: [0, 5],
+    commandIds: {mit: 'CAN_ID', position: '0x100 + CAN_ID', velocity: '0x200 + CAN_ID', forcePosition: '0x300 + CAN_ID'},
+    source: 'DM-J4340-2EC V1.1 使用说明书 V1.1；达妙调试工具手册；Seeed 达妙 43 系列指南',
+  },
+];
+let motorDebugState = JSON.parse(localStorage.getItem('teleop.motorDebugState') || '{}');
+let motorDebugHydrated = false;
+if (motorDebugState.kd === 0.2 || motorDebugState.kd === 1.0) {
+  motorDebugState = {...motorDebugState, kd: MOTOR_DEBUG_MODELS[0].defaultKd};
+  localStorage.setItem('teleop.motorDebugState', JSON.stringify(motorDebugState));
+}
+let motorDebugLogs = JSON.parse(localStorage.getItem('teleop.motorDebugLogs') || '[]');
 const TASK_PAGE_SIZE = 10;
 let dataPreviewState = {preview:null,index:0,taskId:null,episode:null};
 let dataListState = {taskId:'',page:1,pageSize:50,total:0,episodes:[],tasks:[],loading:false};
@@ -1211,6 +1250,186 @@ function renderOssView() {
   renderOssTransfer();
   ensureOssTaskLocalDir().catch(error => showNotice(error.message));
 }
+function selectedMotorModel() {
+  const selectedId = $('#motorModelSelect')?.value || motorDebugState.modelId || MOTOR_DEBUG_MODELS[0].id;
+  return MOTOR_DEBUG_MODELS.find(model => model.id === selectedId) || MOTOR_DEBUG_MODELS[0];
+}
+function clampMotorTarget(value, limit) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(-limit, Math.min(limit, number));
+}
+function currentMotorDebugValues() {
+  const model = selectedMotorModel();
+  const fieldValue = (id, key, fallback) => {
+    const input = $(`#${id}`);
+    if (motorDebugHydrated && input) return input.value;
+    return motorDebugState[key] ?? fallback;
+  };
+  const mode = motorDebugState.mode || 'mit';
+  const safeMode = ['mit', 'position', 'velocity', 'forcePosition'].includes(mode) ? mode : 'mit';
+  const direction = fieldValue('motorDirection', 'direction', model.defaultDirection);
+  const safeDirection = ['left', 'right'].includes(direction) ? direction : model.defaultDirection;
+  return {
+    modelId: model.id,
+    canDevice: String(fieldValue('motorCanDevice', 'canDevice', 'can0')).trim() || 'can0',
+    canId: Math.max(0, Math.min(2047, Math.trunc(Number(fieldValue('motorCanId', 'canId', 1)) || 1))),
+    bitrate: String(fieldValue('motorBitrate', 'bitrate', '1000000')),
+    mode: safeMode,
+    direction: safeDirection,
+    position: 0,
+    velocity: 0,
+    torque: clampMotorTarget(fieldValue('motorTorqueTarget', 'torque', model.defaultTorque), model.defaultTmax),
+    turnSpeed: Math.max(0, Math.min(model.defaultVmax, Number(fieldValue('motorTurnSpeed', 'turnSpeed', model.defaultTurnSpeed)) || 0)),
+    durationSec: Math.max(0.05, Math.min(60, Number(fieldValue('motorDurationSec', 'durationSec', model.defaultDurationSec)) || model.defaultDurationSec)),
+    controlHz: Math.max(5, Math.min(200, Number(fieldValue('motorControlHz', 'controlHz', model.defaultControlHz)) || model.defaultControlHz)),
+    kp: 0,
+    kd: Math.max(model.kdRange[0], Math.min(model.kdRange[1], Number(fieldValue('motorKd', 'kd', model.defaultKd)) || 0)),
+  };
+}
+function persistMotorDebugValues() {
+  motorDebugState = currentMotorDebugValues();
+  localStorage.setItem('teleop.motorDebugState', JSON.stringify(motorDebugState));
+}
+function motorModeText(mode) {
+  return ({mit:'MIT 混合控制', position:'位置速度模式', velocity:'速度模式', forcePosition:'力位混控模式'}[mode] || mode);
+}
+function motorCommandSummary(values = currentMotorDebugValues(), model = selectedMotorModel()) {
+  return [
+    `model=${model.name}`,
+    `can=${values.canDevice}`,
+    `bitrate=${values.bitrate}`,
+    `id=${values.canId}`,
+    `run_direction=${values.direction === 'left' ? 'left(向左)' : 'right(向右)'}`,
+    `run_frame=0x${values.canId.toString(16).toUpperCase()}(MIT)`,
+    `turn_speed=${values.turnSpeed.toFixed(3)}rad/s`,
+    `duration=${values.durationSec.toFixed(2)}s`,
+    `control_hz=${values.controlHz}`,
+    `mode=${motorModeText(values.mode)}`,
+    `torque_ff=${values.torque.toFixed(3)}Nm`,
+    `kd=${values.kd}`,
+  ].join(' ');
+}
+function renderMotorDebug() {
+  const select = $('#motorModelSelect');
+  if (!select) return;
+  const selectedId = select.value || motorDebugState.modelId || MOTOR_DEBUG_MODELS[0].id;
+  select.innerHTML = MOTOR_DEBUG_MODELS.map(model => `<option value="${escapeHtml(model.id)}" ${model.id === selectedId ? 'selected' : ''}>${escapeHtml(model.vendor)} · ${escapeHtml(model.name)}</option>`).join('');
+  const model = selectedMotorModel();
+  const values = currentMotorDebugValues();
+  ['CanDevice','CanId','Bitrate','Direction','TorqueTarget','TurnSpeed','DurationSec','ControlHz','Kd'].forEach(name => {
+    const input = $(`#motor${name}`);
+    if (!input) return;
+    const key = {
+      CanDevice:'canDevice', CanId:'canId', Bitrate:'bitrate', Direction:'direction',
+      TorqueTarget:'torque', TurnSpeed:'turnSpeed', DurationSec:'durationSec', ControlHz:'controlHz', Kd:'kd',
+    }[name];
+    input.value = values[key];
+  });
+  const live = appState.motor_debug || {};
+  $('#motorDebugBadge').textContent = live.connected ? `已连接 ${live.channel || values.canDevice}` : `${model.name} · ${model.protocol}`;
+  $('#motorDebugBadge').classList.toggle('connected', Boolean(live.connected));
+  $('#motorSpecPanel').innerHTML = [
+    ['额定电压', model.voltage],
+    ['工作电压', model.voltageRange],
+    ['额定/峰值转矩', `${model.ratedTorque} / ${model.peakTorque} Nm`],
+    ['额定/空载转速', `${model.ratedSpeedRpm} / ${model.noLoadSpeedRpm} rpm`],
+    ['减速比', model.gearRatio],
+    ['极对数', model.polePairs],
+    ['编码器', model.encoder],
+    ['重量', model.weight],
+    ['尺寸', model.dimensions],
+    ['控制接口', 'CAN STD 默认 1Mbps'],
+    ['调参接口', 'UART 921600bps'],
+    ['资料来源', model.source],
+  ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
+  motorDebugHydrated = true;
+  const feedback = live.last_feedback || {};
+  const checks = [
+    ['左右转速度', values.turnSpeed <= model.defaultVmax, `${values.turnSpeed.toFixed(3)} / ${model.defaultVmax} rad/s`],
+    ['运动时间', values.durationSec <= 60, `${values.durationSec.toFixed(2)} s 后自动停止`],
+    ['速度阻尼', values.kd >= model.kdRange[0] && values.kd <= model.kdRange[1], `Kd ${values.kd} / ${model.kdRange[1]}`],
+    ['辅助转矩', Math.abs(values.torque) <= model.defaultTmax, `${values.torque.toFixed(3)} / ±${model.defaultTmax} Nm`],
+    ['反馈速度', true, feedback.velocity_rad_s == null ? '暂无反馈' : `${Number(feedback.velocity_rad_s).toFixed(3)} rad/s`],
+    ['反馈转矩', feedback.torque_nm == null || Math.abs(feedback.torque_nm) < model.defaultTmax, feedback.torque_nm == null ? '暂无反馈' : `${Number(feedback.torque_nm).toFixed(3)} Nm`],
+  ];
+  $('#motorSafetyPanel').innerHTML = checks.map(([label, ok, detail]) => `<div class="${ok ? 'ok' : 'warn'}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(detail)}</strong></div>`).join('');
+  $('#motorCommandText').textContent = motorCommandSummary(values, model);
+  const liveRows = [
+    live.last_error ? {time: live.updated_at, title: '后端错误', summary: live.last_error} : null,
+    live.motion?.running ? {time: live.motion.started_at, title: '运动中', summary: `${live.motion.direction === 'left' ? '向左' : '向右'} ${Number(live.motion.speed_rad_s || 0).toFixed(3)} rad/s，${Number(live.motion.duration_s || 0).toFixed(2)}s 自动停止`} : null,
+    live.motion?.stop_reason && !live.motion?.running ? {time: live.motion.finished_at, title: '运动停止', summary: live.motion.stop_reason} : null,
+    live.last_frame ? {time: live.last_frame.sent_at, title: `已发送 ${live.last_action || ''}`, summary: `${live.last_frame.can_id} [${live.last_frame.dlc}] ${live.last_frame.data}`} : null,
+    live.last_feedback ? {time: live.last_feedback.received_at, title: '反馈帧', summary: `${live.last_feedback.can_id} [${live.last_feedback.dlc}] ${live.last_feedback.data}`} : null,
+  ].filter(Boolean);
+  const rows = [...liveRows, ...motorDebugLogs].slice(0, 10);
+  const logRows = rows.length
+    ? rows.map(item => `<div><span>${escapeHtml(formatTime(item.time))}</span><strong>${escapeHtml(item.title)}</strong><code>${escapeHtml(item.summary)}</code></div>`).join('')
+    : '<div class="data-preview-empty compact">暂无调试记录</div>';
+  $('#motorLogPanel').innerHTML = logRows;
+  $('#motorGuidePanel').innerHTML = [
+    '确认电源电压、CAN_H/CAN_L、终端电阻和电机 ID。',
+    '点击连接电机，只打开 CAN 设备，不发送运动命令。',
+    '运行会按选择方向和发送频率持续给速度，到转动时间自动停止。',
+    '负载较大时优先调速度阻尼 Kd，必要时再少量增加辅助转矩。',
+    '出现异常先停止/失能，排除机构和电源问题后清除异常再使能。'
+  ].map((text, index) => `<div><span>${index + 1}</span><p>${escapeHtml(text)}</p></div>`).join('');
+  persistMotorDebugValues();
+}
+function motorDebugPayload() {
+  const values = currentMotorDebugValues();
+  const model = selectedMotorModel();
+  return {
+    ...values,
+    pmax: model.defaultPmax,
+    vmax: model.defaultVmax,
+    tmax: model.defaultTmax,
+    durationSec: values.durationSec,
+    controlHz: values.controlHz,
+  };
+}
+async function runMotorDebugCommand(command, button = null) {
+  const labels = {connect:'连接电机', enable:'使能电机', left:'向左转动', right:'向右转动', stop:'停止', clear:'清除异常', zero:'设置零点', disable:'失能电机'};
+  const originalText = button?.textContent || '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = `${labels[command] || '执行'}...`;
+  }
+  try {
+    const path = command === 'connect' ? '/api/motor/connect' : '/api/motor/control';
+    const result = await api(path, {action: command, config: motorDebugPayload()});
+    appState.motor_debug = result.motor_debug || {};
+    motorDebugLogs = [{
+      time: new Date().toISOString(),
+      title: labels[command] || command,
+      summary: motorCommandSummary(currentMotorDebugValues(), selectedMotorModel()),
+    }, ...motorDebugLogs].slice(0, 20);
+    localStorage.setItem('teleop.motorDebugLogs', JSON.stringify(motorDebugLogs));
+    showNotice(`${labels[command] || '电机命令'}已执行`, 'success');
+    renderMotorDebug();
+  } catch(error) {
+    appState.motor_debug = {...(appState.motor_debug || {}), last_error: error.message, updated_at: new Date().toISOString()};
+    showNotice(error.message);
+    renderMotorDebug();
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+function recordMotorDebugCommand(command) {
+  const values = currentMotorDebugValues();
+  const labels = {connect:'连接检查', enable:'使能电机', zero:'设置零点', send:'生成控制帧', disable:'失能电机'};
+  motorDebugLogs = [{
+    time: new Date().toISOString(),
+    title: labels[command] || command,
+    summary: motorCommandSummary(values, selectedMotorModel()),
+  }, ...motorDebugLogs].slice(0, 20);
+  localStorage.setItem('teleop.motorDebugLogs', JSON.stringify(motorDebugLogs));
+  showNotice(`${labels[command] || '调试命令'}已记录，真实下发接口后续接入`, 'success');
+  renderMotorDebug();
+}
 function renderDataPreview(preview, episodeName = '') {
   const episodes = preview?.episodes || [];
   const selectedIndex = episodeName ? episodes.findIndex(item => item.name === episodeName) : 0;
@@ -1576,6 +1795,8 @@ function renderActiveView() {
     renderDevice();
   } else if (activeView === 'tasks') {
     renderTasks();
+  } else if (activeView === 'motorDebug') {
+    renderMotorDebug();
   } else if (activeView === 'dataList') {
     renderDataList();
   } else if (activeView === 'processing') {
@@ -1715,6 +1936,27 @@ setActiveView(activeView);
 $('#sidebarToggle')?.addEventListener('click', toggleSidebar);
 applySidebarState();
 setupTrainingSetCreator();
+$('#motorResetButton')?.addEventListener('click', () => {
+  motorDebugState = {
+    modelId: MOTOR_DEBUG_MODELS[0].id,
+    canDevice: 'can0',
+    canId: 1,
+    bitrate: '1000000',
+    mode: 'mit',
+    direction: MOTOR_DEBUG_MODELS[0].defaultDirection,
+    position: 0,
+    velocity: 0,
+    torque: MOTOR_DEBUG_MODELS[0].defaultTorque,
+    turnSpeed: MOTOR_DEBUG_MODELS[0].defaultTurnSpeed,
+    durationSec: MOTOR_DEBUG_MODELS[0].defaultDurationSec,
+    controlHz: MOTOR_DEBUG_MODELS[0].defaultControlHz,
+    kp: 0,
+    kd: MOTOR_DEBUG_MODELS[0].defaultKd,
+  };
+  localStorage.setItem('teleop.motorDebugState', JSON.stringify(motorDebugState));
+  renderMotorDebug();
+  showNotice('电机调试参数已恢复默认', 'success');
+});
 $$('[data-close]').forEach(button => button.addEventListener('click', () => closeModal(button.dataset.close)));
 $$('.modal').forEach(modal => modal.addEventListener('click', event => { if (event.target === modal) closeModal(modal.id); }));
 document.addEventListener('pointerdown', event => {
@@ -2067,6 +2309,10 @@ $('#dataListPageJump')?.addEventListener('input', event => {
 $('#dataListPageJump')?.addEventListener('change', event => jumpDataListPage(event.currentTarget));
 $('#dataListPageJump')?.addEventListener('blur', event => jumpDataListPage(event.currentTarget));
 document.addEventListener('change', event => {
+  if (event.target?.closest('#motorDebugView')) {
+    renderMotorDebug();
+    return;
+  }
   if (event.target?.id === 'ossTaskNameInput') {
     const taskName = cleanTaskName(event.target.value);
     ossTransferState.taskName = taskName;
@@ -2084,6 +2330,10 @@ document.addEventListener('change', event => {
   }
 });
 document.addEventListener('input', event => {
+  if (event.target?.closest('#motorDebugView')) {
+    renderMotorDebug();
+    return;
+  }
   if (event.target?.id === 'ossTaskNameInput') {
     ossTransferState.taskName = cleanTaskName(event.target.value);
   }
@@ -2399,6 +2649,18 @@ document.addEventListener('click', async event => {
   if(action==='copy-target'){
     const target = document.getElementById(button.dataset.target);
     await copyText(target?.textContent || '');
+    return;
+  }
+  if(action==='motor-control'){
+    await runMotorDebugCommand(button.dataset.command || 'connect', button);
+    return;
+  }
+  if(action==='motor-run'){
+    await runMotorDebugCommand(currentMotorDebugValues().direction, button);
+    return;
+  }
+  if(action==='motor-sim'){
+    recordMotorDebugCommand(button.dataset.command || 'send');
     return;
   }
   if(action==='timestamp-now'){

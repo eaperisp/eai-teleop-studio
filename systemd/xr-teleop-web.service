@@ -12,6 +12,8 @@ Environment=HOME=/home/robot
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONNOUSERSITE=1
 Environment=XR_TELEOP_WEBRTC_SCHEME=https
+Environment=XR_TELEOP_CERT=@PROJECT_ROOT@/config/cert.pem
+Environment=XR_TELEOP_KEY=@PROJECT_ROOT@/config/key.pem
 Environment=XR_TELEOP_DEFAULT_WEBRTC_SERVER_IP=192.168.60.182
 Environment=XR_TELEOP_DEFAULT_IMAGE_SERVER_IP=192.168.123.5
 Environment=XR_TELEOP_PYTHON=/home/robot/miniconda3/envs/teleop/bin/python3

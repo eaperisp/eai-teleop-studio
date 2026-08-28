@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 import time
 from typing import Iterable, Literal
 
@@ -33,6 +34,7 @@ class InspireDFXHandState:
 
     side: HandSide
     angles: tuple[float, float, float, float, float, float]
+    lost: tuple[int, int, int, int, int, int] = (0, 0, 0, 0, 0, 0)
 
 
 class InspireDFXHandSDK:
@@ -57,6 +59,8 @@ class InspireDFXHandSDK:
         self._last_command = [1.0] * TOTAL_DOF
         self._state_synced = False
         self._initialized = False
+        self._command_lock = threading.Lock()
+        self._command_generation = 0
 
     def initialize(self) -> None:
         if self._initialized:
@@ -99,7 +103,8 @@ class InspireDFXHandSDK:
 
         offset = self._offset(side)
         angles = [float(state.states[offset + index].q) for index in range(HAND_DOF)]
-        return InspireDFXHandState(side=side, angles=tuple(angles))
+        lost = [self._motor_lost(state.states[offset + index]) for index in range(HAND_DOF)]
+        return InspireDFXHandState(side=side, angles=tuple(angles), lost=tuple(lost))
 
     def read_states(self, timeout: float = 0.02) -> dict[HandSide, InspireDFXHandState | None]:
         if not self._initialized:
@@ -114,20 +119,74 @@ class InspireDFXHandSDK:
                 continue
             offset = self._offset(side)
             angles = tuple(float(state.states[offset + index].q) for index in range(HAND_DOF))
-            result[side] = InspireDFXHandState(side=side, angles=angles)  # type: ignore[arg-type]
+            lost = tuple(self._motor_lost(state.states[offset + index]) for index in range(HAND_DOF))
+            result[side] = InspireDFXHandState(  # type: ignore[arg-type]
+                side=side,
+                angles=angles,
+                lost=lost,
+            )
         return result
 
     def command(self, side: HandSide, angles: Iterable[int | float]) -> list[float]:
-        self._require_side(side)
-        if not self._state_synced:
-            self._sync_last_command_from_state(timeout=0.05)
-        normalized = self._coerce_angles(angles)
-        offset = self._offset(side)
-        for index, value in enumerate(normalized):
-            self._last_command[offset + index] = value
-            self._cmd_msg.cmds[offset + index].q = value
-        self._publisher.Write(self._cmd_msg)
+        normalized, _ = self._command_once(side, angles)
         return normalized
+
+    def command_burst(
+        self,
+        side: HandSide,
+        angles: Iterable[int | float],
+        duration: float = 0.4,
+        rate: float = 20.0,
+    ) -> list[float]:
+        """Publish a target repeatedly so a one-shot UI action is not lost."""
+
+        normalized, generation = self._command_once(side, angles)
+        hold_duration = max(0.0, float(duration))
+        publish_rate = max(1.0, float(rate))
+        if hold_duration > 0.0:
+            threading.Thread(
+                target=self._repeat_latest_command,
+                args=(generation, hold_duration, publish_rate),
+                daemon=True,
+                name="inspire-dfx-command-burst",
+            ).start()
+        return normalized
+
+    def cancel_command_burst(self) -> None:
+        with self._command_lock:
+            self._command_generation += 1
+
+    def _command_once(
+        self,
+        side: HandSide,
+        angles: Iterable[int | float],
+    ) -> tuple[list[float], int]:
+        self._require_side(side)
+        normalized = self._coerce_angles(angles)
+        with self._command_lock:
+            if not self._state_synced:
+                self._sync_last_command_from_state(timeout=0.05)
+            offset = self._offset(side)
+            for index, value in enumerate(normalized):
+                self._last_command[offset + index] = value
+                self._cmd_msg.cmds[offset + index].q = value
+            self._command_generation += 1
+            generation = self._command_generation
+            self._publisher.Write(self._cmd_msg)
+        return normalized, generation
+
+    def _repeat_latest_command(self, generation: int, duration: float, rate: float) -> None:
+        deadline = time.monotonic() + duration
+        interval = 1.0 / rate
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return
+            time.sleep(min(interval, remaining))
+            with self._command_lock:
+                if generation != self._command_generation:
+                    return
+                self._publisher.Write(self._cmd_msg)
 
     def move_to(
         self,
@@ -183,6 +242,13 @@ class InspireDFXHandSDK:
             return self._subscriber.Read(timeout)
         except TypeError:
             return self._subscriber.Read()
+
+    @staticmethod
+    def _motor_lost(motor_state: object) -> int:
+        try:
+            return max(0, int(getattr(motor_state, "lost", 0)))
+        except (TypeError, ValueError):
+            return 0
 
     def _sync_last_command_from_state(self, timeout: float) -> None:
         state = self._read_raw_state(timeout)

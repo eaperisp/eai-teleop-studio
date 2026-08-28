@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>灵巧手调试工具</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=20260821-pose-live-refresh">
 </head>
 <body>
   <div class="app-shell">
@@ -144,11 +144,14 @@
           <section class="joint-panel panel">
             <div class="panel-title">
               <div><span class="section-index">03</span><h2>关节位置</h2></div>
-              <span class="range-caption">0 张开 / 100 闭合</span>
+              <div class="joint-title-actions">
+                <span class="range-caption">0 张开 / 100 闭合</span>
+                <button class="icon-button" id="refreshJointsButton" type="button" title="刷新当前关节" aria-label="刷新当前关节" disabled>&#x21BB;</button>
+              </div>
             </div>
             <div class="joint-list" id="jointList"></div>
             <div class="command-bar">
-              <label class="duration-field" id="durationField">
+              <label class="duration-field" id="durationField" hidden>
                 <span>动作时长</span>
                 <input type="range" id="durationInput" min="50" max="2000" step="50" value="500">
                 <output id="durationOutput">500 ms</output>
@@ -171,7 +174,7 @@
                 <div class="pose-library-heading">
                   <div>
                     <strong>姿态库</strong>
-                    <span>载入后由“执行姿态”确认发送</span>
+                    <span id="poseLibraryHint">载入后由“执行姿态”确认发送</span>
                   </div>
                   <button class="button secondary compact" id="addPoseButton" type="button">新增姿态</button>
                 </div>
@@ -255,6 +258,6 @@
 
   <div class="toast" id="toast" role="status"></div>
   <script src="/hand-preview.js"></script>
-  <script src="/app.js"></script>
+  <script src="/app.js?v=20260821-offline-feedback"></script>
 </body>
 </html>

@@ -64,12 +64,16 @@ fi
 
 systemctl daemon-reload
 for service in "${SERVICES[@]}"; do
-  systemctl enable --now "${service}"
+  systemctl enable "${service}"
+  systemctl restart "${service}"
   systemctl --no-pager --lines=0 status "${service}" || true
 done
 
 echo "Done. View logs with:"
-echo "  journalctl -u <service> -f"
-echo "  tail -f ${PROJECT_ROOT}/logs/app/<service>.log"
+for service in "${SERVICES[@]}"; do
+  echo "  ${service}:"
+  echo "    journalctl -u ${service} -f"
+  echo "    tail -f ${PROJECT_ROOT}/logs/app/${service}.log"
+done
 echo "Log rotation:"
 echo "  logrotate -d ${LOGROTATE_DST}"

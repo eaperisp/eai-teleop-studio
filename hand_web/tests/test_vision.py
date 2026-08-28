@@ -133,7 +133,18 @@ class VisionTests(unittest.TestCase):
             result = mapper.map(landmarks(), timestamp=1.0)
         self.assertEqual(result, [0.2] * 6)
 
-    def test_open_hand_gesture_anchors_only_four_fingers(self):
+    def test_open_hand_gesture_anchors_four_fingers_when_curls_agree(self):
+        mapper = BraincoRevo2VisionMapper({
+            "endpoint_snap": 0,
+            "deadband": 0,
+            "thumb_flex_aux_coupling": 0.9,
+        })
+        with patch.object(HandFeatureExtractor, "extract") as extract:
+            extract.return_value = HandFeatures(5.0, 25.0, 12.0, 12.0, 12.0, 12.0)
+            result = mapper.map(landmarks(), "Open Hand", timestamp=1.0)
+        self.assertEqual(result, [0.72, 0.8, 0.0, 0.0, 0.0, 0.0])
+
+    def test_open_hand_misclassification_keeps_visible_finger_curls(self):
         mapper = BraincoRevo2VisionMapper({
             "endpoint_snap": 0,
             "deadband": 0,
@@ -142,7 +153,8 @@ class VisionTests(unittest.TestCase):
         with patch.object(HandFeatureExtractor, "extract") as extract:
             extract.return_value = HandFeatures(5.0, 25.0, 35.0, 35.0, 35.0, 35.0)
             result = mapper.map(landmarks(), "Open Hand", timestamp=1.0)
-        self.assertEqual(result, [0.72, 0.8, 0.0, 0.0, 0.0, 0.0])
+
+        self.assertTrue(all(value > 0.0 for value in result[2:]))
 
     def test_thumb_adduction_couples_into_revo2_thumb_flex(self):
         mapper = BraincoRevo2VisionMapper({

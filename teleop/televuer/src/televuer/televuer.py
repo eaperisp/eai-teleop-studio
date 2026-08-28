@@ -89,7 +89,20 @@ class TeleVuer:
                     cert_file = cert_file or str(current_module_dir / "cert.pem")
                     key_file = key_file or str(current_module_dir / "key.pem")
 
-        self.vuer = Vuer(host='0.0.0.0', cert=cert_file, key=key_file, queries=dict(grid=False), queue_len=3)
+        cert_path = Path(cert_file).expanduser() if cert_file else None
+        key_path = Path(key_file).expanduser() if key_file else None
+        if cert_path is None or not cert_path.is_file():
+            raise FileNotFoundError(
+                f"[TeleVuer] HTTPS certificate not found: {cert_path}. "
+                "Set XR_TELEOP_CERT or install ~/.config/xr_teleoperate/cert.pem."
+            )
+        if key_path is None or not key_path.is_file():
+            raise FileNotFoundError(
+                f"[TeleVuer] HTTPS private key not found: {key_path}. "
+                "Set XR_TELEOP_KEY or install ~/.config/xr_teleoperate/key.pem."
+            )
+
+        self.vuer = Vuer(host='0.0.0.0', cert=str(cert_path), key=str(key_path), queries=dict(grid=False), queue_len=3)
         self.vuer.add_handler("CAMERA_MOVE")(self.on_cam_move)
         if self.use_hand_tracking:
             self.vuer.add_handler("HAND_MOVE")(self.on_hand_move)
@@ -100,10 +113,18 @@ class TeleVuer:
         self.zmq = zmq
         self.webrtc = webrtc
         self.webrtc_url = webrtc_url
+        self._camera_move_error_log_time = 0.0
         self._controller_move_event_count = 0
         self._controller_move_error_log_time = 0.0
         self._hand_move_event_count = 0
         self._hand_move_error_log_time = 0.0
+        try:
+            self.motion_data_stale_timeout = max(
+                0.1,
+                float(os.environ.get("XR_TELEOP_MOTION_STALE_TIMEOUT", "0.5")),
+            )
+        except ValueError:
+            self.motion_data_stale_timeout = 0.5
 
         if self.display_mode == "immersive":
             if self.webrtc:
@@ -144,6 +165,7 @@ class TeleVuer:
         self.left_arm_pose_shared = Array('d', 16, lock=True)
         self.right_arm_pose_shared = Array('d', 16, lock=True)
         self.motion_data_ready_shared = Value('b', False, lock=True)
+        self.motion_data_last_update_shared = Value('d', 0.0, lock=True)
         if self.use_hand_tracking:
             self.left_hand_position_shared = Array('d', 75, lock=True)
             self.right_hand_position_shared = Array('d', 75, lock=True)
@@ -226,10 +248,66 @@ class TeleVuer:
 
     async def on_cam_move(self, event, session, fps=60):
         try:
+            value = getattr(event, "value", {})
+            camera = value.get("camera", {}) if isinstance(value, dict) else {}
+            matrix = self._fixed_vector(camera.get("matrix"), 16, "camera.matrix")
             with self.head_pose_shared.get_lock():
-                self.head_pose_shared[:] = event.value["camera"]["matrix"]
-        except:
-            pass
+                self.head_pose_shared[:] = matrix
+        except Exception as exc:
+            now = time.monotonic()
+            if now - self._camera_move_error_log_time >= 1.0:
+                self._camera_move_error_log_time = now
+                print(
+                    "[TeleVuer] CAMERA_MOVE handler failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
+    @staticmethod
+    def _fixed_vector(value, size, field_name):
+        """Flatten browser motion data and enforce the shared-array size."""
+        if isinstance(value, dict):
+            wrapper_key = next(
+                (key for key in ("matrix", "transform", "pose", "value") if key in value),
+                None,
+            )
+            if wrapper_key is not None:
+                value = value[wrapper_key]
+            elif value and all(str(key).isdigit() for key in value):
+                value = [item for _, item in sorted(value.items(), key=lambda pair: int(pair[0]))]
+        if isinstance(value, (list, tuple, np.ndarray)) and len(value) == 2:
+            tracking_status = value[1]
+            if isinstance(tracking_status, (bool, np.bool_)):
+                if not tracking_status:
+                    raise ValueError(f"{field_name} tracking is invalid")
+                return TeleVuer._fixed_vector(value[0], size, field_name)
+        try:
+            vector = np.asarray(value, dtype=float).reshape(-1)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} is not numeric") from exc
+        if vector.size != size:
+            raise ValueError(f"{field_name} expected {size} values, got {vector.size}")
+        if not np.all(np.isfinite(vector)):
+            raise ValueError(f"{field_name} contains non-finite values")
+        return vector.tolist()
+
+    def _mark_motion_data_ready(self):
+        with self.motion_data_last_update_shared.get_lock():
+            self.motion_data_last_update_shared.value = time.monotonic()
+        with self.motion_data_ready_shared.get_lock():
+            self.motion_data_ready_shared.value = True
+
+    @staticmethod
+    def _describe_motion_value(value):
+        if isinstance(value, dict):
+            details = {}
+            for key, item in value.items():
+                try:
+                    details[key] = list(item.keys()) if isinstance(item, dict) else np.asarray(item).shape
+                except (TypeError, ValueError):
+                    details[key] = type(item).__name__
+            return details
+        return type(value).__name__
 
     async def on_controller_move(self, event, session, fps=60):
         """https://docs.vuer.ai/en/latest/examples/20_motion_controllers.html"""
@@ -242,16 +320,29 @@ class TeleVuer:
                     f"keys={list(value.keys()) if isinstance(value, dict) else type(value)}",
                     flush=True,
                 )
+            if not isinstance(value, dict):
+                return
             # ControllerData
-            with self.left_arm_pose_shared.get_lock():
-                self.left_arm_pose_shared[:] = value["left"]
-            with self.right_arm_pose_shared.get_lock():
-                self.right_arm_pose_shared[:] = value["right"]
+            pose_updated = False
+            field_errors = []
+            for prefix in ("left", "right"):
+                pose_value = value.get(prefix)
+                if pose_value is None:
+                    continue
+                try:
+                    pose = self._fixed_vector(pose_value, 16, prefix)
+                    pose_shared = getattr(self, f"{prefix}_arm_pose_shared")
+                    with pose_shared.get_lock():
+                        pose_shared[:] = pose
+                    pose_updated = True
+                except (TypeError, ValueError) as exc:
+                    field_errors.append(str(exc))
+            if pose_updated:
+                self._mark_motion_data_ready()
             # ControllerState
-            left_controller = value["leftState"]
-            right_controller = value["rightState"]
-
             def extract_controllers(controllerState, prefix):
+                if not isinstance(controllerState, dict):
+                    return
                 # trigger
                 with getattr(self, f"{prefix}_ctrl_trigger_shared").get_lock():
                     getattr(self, f"{prefix}_ctrl_trigger_shared").value = bool(controllerState.get("trigger", False))
@@ -266,26 +357,34 @@ class TeleVuer:
                 with getattr(self, f"{prefix}_ctrl_thumbstick_shared").get_lock():
                     getattr(self, f"{prefix}_ctrl_thumbstick_shared").value = bool(controllerState.get("thumbstick", False))
                 with getattr(self, f"{prefix}_ctrl_thumbstickValue_shared").get_lock():
-                    getattr(self, f"{prefix}_ctrl_thumbstickValue_shared")[:] = controllerState.get("thumbstickValue", [0.0, 0.0])
+                    thumbstick = self._fixed_vector(
+                        controllerState.get("thumbstickValue", [0.0, 0.0]),
+                        2,
+                        f"{prefix}State.thumbstickValue",
+                    )
+                    getattr(self, f"{prefix}_ctrl_thumbstickValue_shared")[:] = thumbstick
                 # buttons
                 with getattr(self, f"{prefix}_ctrl_aButton_shared").get_lock():
                     getattr(self, f"{prefix}_ctrl_aButton_shared").value = bool(controllerState.get("aButton", False))
                 with getattr(self, f"{prefix}_ctrl_bButton_shared").get_lock():
                     getattr(self, f"{prefix}_ctrl_bButton_shared").value = bool(controllerState.get("bButton", False))
 
-            extract_controllers(left_controller, "left")
-            extract_controllers(right_controller, "right")
-            with self.motion_data_ready_shared.get_lock():
-                self.motion_data_ready_shared.value = True
+            for prefix in ("left", "right"):
+                try:
+                    extract_controllers(value.get(f"{prefix}State", {}), prefix)
+                except (TypeError, ValueError) as exc:
+                    field_errors.append(f"{prefix}State: {exc}")
+            if field_errors:
+                raise ValueError("; ".join(field_errors))
         except Exception as exc:
             now = time.monotonic()
             if now - self._controller_move_error_log_time >= 1.0:
                 self._controller_move_error_log_time = now
                 value = getattr(event, "value", None)
-                keys = list(value.keys()) if isinstance(value, dict) else type(value)
+                details = self._describe_motion_value(value)
                 print(
                     "[TeleVuer] CONTROLLER_MOVE handler failed: "
-                    f"{type(exc).__name__}: {exc}; keys={keys}",
+                    f"{type(exc).__name__}: {exc}; payload={details}",
                     flush=True,
                 )
             return
@@ -379,8 +478,7 @@ class TeleVuer:
             if right_valid:
                 extract_hands(right_hand, "right")
             if left_valid or right_valid:
-                with self.motion_data_ready_shared.get_lock():
-                    self.motion_data_ready_shared.value = True
+                self._mark_motion_data_ready()
 
         except Exception as exc:
             now = time.monotonic()
@@ -950,6 +1048,11 @@ class TeleVuer:
 
     @property
     def motion_data_ready(self):
-        """bool, whether at least one hand or controller motion data event has been received."""
+        """Whether valid XR motion data has arrived recently enough for control."""
         with self.motion_data_ready_shared.get_lock():
-            return self.motion_data_ready_shared.value
+            ready = self.motion_data_ready_shared.value
+        if not ready:
+            return False
+        with self.motion_data_last_update_shared.get_lock():
+            last_update = self.motion_data_last_update_shared.value
+        return time.monotonic() - last_update <= self.motion_data_stale_timeout

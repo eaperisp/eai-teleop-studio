@@ -261,6 +261,10 @@ tbody tr:hover{background:#123452}
   display:flex;
   flex-direction:column;
 }
+#motorDebugView.active{
+  display:flex;
+  flex-direction:column;
+}
 #trainingView .page-title{
   order:0;
 }
@@ -1111,6 +1115,46 @@ tbody tr:hover{background:#123452}
 }
 .manual-doc-card{padding-bottom:18px;background:#071827}
 .training-command-flat{display:block}
+.motor-debug-layout{display:grid;grid-template-columns:minmax(520px,1.35fr) minmax(320px,.8fr);gap:16px;align-items:start}
+.motor-debug-wide{grid-column:1/-1}
+.motor-debug-main{min-width:0}
+.motor-debug-badge{display:inline-flex;align-items:center;max-width:320px;min-height:28px;border:1px solid rgba(56,247,131,.42);border-radius:5px;padding:4px 9px;color:#38f783;background:rgba(56,247,131,.1);font-size:12px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.motor-debug-badge.connected{color:#061424;background:#38f783;border-color:#38f783}
+.motor-debug-form{display:grid;grid-template-columns:1fr;gap:12px;padding:16px}
+.motor-field-group{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:12px;padding:12px;border:1px solid #1d456b;border-radius:8px;background:#071827}
+.motor-field-group.compact{grid-template-columns:1fr}
+.motor-field-group-head{grid-column:1/-1;display:flex;align-items:flex-end;justify-content:space-between;gap:12px;padding-bottom:2px}
+.motor-field-group-head strong{color:#fff;font-size:14px}
+.motor-field-group-head span{color:#8fb8d9;font-size:12px}
+.motor-field-group-head .action{min-height:30px;padding:5px 10px}
+.motor-inline-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.motor-debug-form label{display:grid;gap:6px;min-width:0}
+.motor-debug-form span{color:#9fd8ff;font-size:12px;font-weight:800}
+.motor-debug-form input,.motor-debug-form select{width:100%;height:40px;border:1px solid #256895;border-radius:6px;padding:0 10px;background:#061522;color:#fff;outline:0}
+.motor-debug-form input:focus,.motor-debug-form select:focus{border-color:#4ad8ff;box-shadow:0 0 0 2px rgba(74,216,255,.18)}
+.motor-advanced-fields{border:1px solid #163a58;border-radius:8px;background:#071827;overflow:hidden}
+.motor-advanced-fields summary{cursor:pointer;padding:12px;color:#dff7ff;font-weight:800}
+.motor-advanced-fields[open] summary{border-bottom:1px solid #163a58}
+.motor-advanced-fields>div{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:12px;padding:12px}
+.motor-safety-panel{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;padding:0 16px 16px}
+.motor-safety-panel>div,.motor-spec-panel>div{border:1px solid #1d456b;border-radius:7px;background:#081b2e;padding:10px 12px;min-width:0}
+.motor-safety-panel span,.motor-spec-panel span{display:block;margin-bottom:5px;color:#8fb8d9;font-size:12px}
+.motor-safety-panel strong,.motor-spec-panel strong{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;color:#fff;font-size:13px;white-space:nowrap}
+.motor-safety-panel .ok{border-color:rgba(56,247,131,.34)}
+.motor-safety-panel .ok strong{color:#38f783}
+.motor-safety-panel .warn{border-color:rgba(255,212,90,.42)}
+.motor-safety-panel .warn strong{color:#ffd45a}
+.motor-spec-panel{display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:10px;padding:16px}
+.motor-command{margin:16px}
+.motor-log-panel{display:grid;gap:8px;padding:0 16px 16px}
+.motor-log-panel>div:not(.data-preview-empty){display:grid;grid-template-columns:160px minmax(90px,.35fr) minmax(280px,1fr);gap:10px;align-items:center;border:1px solid #1d456b;border-radius:7px;background:#081b2e;padding:9px 10px}
+.motor-log-panel span{color:#8fb8d9;font-size:12px}
+.motor-log-panel strong{color:#dff7ff;font-size:13px}
+.motor-log-panel code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8fe8ff;font-size:12px}
+.motor-guide-panel{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:10px;padding:16px}
+.motor-guide-panel>div{display:grid;grid-template-columns:28px 1fr;gap:10px;align-items:start;border:1px solid #1d456b;border-radius:7px;background:#081b2e;padding:11px}
+.motor-guide-panel span{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;color:#061424;background:#35c8ff;font-weight:900}
+.motor-guide-panel p{margin:0;color:#d4efff;font-size:12px;line-height:1.55}
 .training-command-card{padding-bottom:18px;background:transparent}
 .training-command-card .manual-param-panel{margin:0 0 18px}
 .training-command-card .manual-command-section{padding:0 0 18px}
@@ -1155,6 +1199,8 @@ tbody tr:hover{background:#123452}
 .manual-command pre{margin:0;padding:16px 18px;max-height:none!important;overflow:visible!important;color:#d6f6ff;background:#030b13;font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"JetBrains Mono","Cascadia Mono","SFMono-Regular",Consolas,monospace}
 .manual-command code{font-family:inherit}
 @media(max-width:900px){
+  .motor-debug-layout,.motor-debug-form,.motor-field-group,.motor-advanced-fields>div,.motor-safety-panel,.motor-spec-panel,.motor-guide-panel,.motor-log-panel>div:not(.data-preview-empty){grid-template-columns:1fr}
+  .motor-field-group-head{display:grid}
   .oss-transfer-grid{
     grid-template-columns:1fr;
   }

@@ -17,6 +17,7 @@
     "filter_derivative_cutoff": 1.0,
     "max_velocity": 3.0,
     "endpoint_snap": 0.025,
+    "open_gesture_snap_max": 0.28,
     "thumb_flex_aux_coupling": 0.9,
     "deadband": 0.005,
     "change_threshold": 0.01,

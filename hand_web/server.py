@@ -96,14 +96,27 @@ def validate_hand_web_port(port: int) -> int:
 
 
 class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
-    """Reject duplicate listeners instead of sharing a Windows TCP port."""
+    """Restart promptly on POSIX while keeping Windows listener exclusivity."""
 
-    allow_reuse_address = False
+    allow_reuse_address = os.name != "nt"
+    request_queue_size = 32
+    request_timeout_seconds = 15.0
 
     def server_bind(self) -> None:
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(self.request_timeout_seconds)
+        return request, client_address
+
+    def handle_error(self, request, client_address) -> None:
+        error = sys.exc_info()[1]
+        if isinstance(error, (ssl.SSLError, socket.timeout, ConnectionError)):
+            return
+        super().handle_error(request, client_address)
 
 
 class HandWebHandler(BaseHTTPRequestHandler):
@@ -428,7 +441,12 @@ def main() -> None:
         if scheme == "https":
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(cert_path, key_path)
-            server.socket = context.wrap_socket(server.socket, server_side=True)
+            # Keep a stalled TLS client from blocking the listener's accept loop.
+            server.socket = context.wrap_socket(
+                server.socket,
+                server_side=True,
+                do_handshake_on_connect=False,
+            )
     except OSError as exc:
         logger.write("error", "hand web server bind failed", host=host, port=port, error=str(exc))
         service.close()

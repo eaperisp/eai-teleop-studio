@@ -155,6 +155,7 @@ sudo ldconfig
 cd /home/robot
 git clone https://github.com/unitreerobotics/DFX_inspire_service.git
 
+# 第二次执行 git apply 会提示“补丁未应用”
 PROJECT_ROOT=/home/robot/eai-teleop-studio
 if ! grep -q 'find_package(fmt REQUIRED)' DFX_inspire_service/CMakeLists.txt; then
   git -C DFX_inspire_service apply \
@@ -260,8 +261,18 @@ openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
   -keyout config/key.pem \
   -out config/cert.pem
 
+
+openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 3650 \
+  -keyout config/key.pem \
+  -out config/cert.pem \
+  -subj "/CN=192.168.60.60" \
+  -addext "subjectAltName=IP:192.168.60.60,DNS:robot"
+
 chmod 600 config/key.pem
 ```
+
+
+
 
 ### 查找相机配置
 
@@ -409,6 +420,8 @@ XR_TELEOP_DATA_DIR=/home/robot/data \
 XR_TELEOP_DEFAULT_WEBRTC_SERVER_IP=<相机服务 IP> \
 XR_TELEOP_DEFAULT_IMAGE_SERVER_IP=<相机服务 IP> \
 XR_TELEOP_WEBRTC_SCHEME=https \
+XR_TELEOP_CERT=/home/robot/eai-teleop-studio/config/cert.pem \
+XR_TELEOP_KEY=/home/robot/eai-teleop-studio/config/key.pem \
 XR_TELEOP_LEROBOT_PYTHON=/home/robot/miniconda3/envs/lerobot/bin/python \
 HF_LEROBOT_HOME=/home/robot/data/datasets/lerobot \
 python -m teleop_web.server \
@@ -464,6 +477,22 @@ journalctl -u xr-teleop-web.service -f
 tail -f /home/robot/eai-teleop-studio/logs/app/xr-teleop-web.service.log
 tail -f /home/robot/eai-teleop-studio/logs/system/teleop_$(date +%F).log
 ```
+
+数据采集任务启动后，`teleop_hand_and_arm.py` 会在 `8012` 创建 TeleVuer HTTPS/WSS 服务；`8012` 不是独立的 systemd 服务。检查方式：
+
+```bash
+ss -ltnp 'sport = :8012'
+curl -kI https://127.0.0.1:8012/
+```
+
+如果遥操进程仍在运行但 `8012` 未监听，并出现 `Vuer encountered an error: [Errno 2] No such file or directory`，通常是 TeleVuer 找不到 HTTPS 证书。确认以下文件存在且服务用户可读，然后重新安装 `xr-teleop-web.service` 并重新进入数据采集：
+
+```bash
+ls -l config/cert.pem config/key.pem
+sudo bash scripts/install_autostart_services.sh xr-teleop-web.service
+```
+
+服务模板会将它们显式设置为 `XR_TELEOP_CERT` 和 `XR_TELEOP_KEY`，不再依赖登录 shell 的临时环境变量。不要在遥操或录制过程中重启 `xr-teleop-web.service`；先从页面安全结束当前任务。
 
 ## 开机自启服务
 
