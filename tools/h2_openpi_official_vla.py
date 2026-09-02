@@ -103,6 +103,136 @@ class Observation:
     image: np.ndarray
     left_wrist_image: np.ndarray
     right_wrist_image: np.ndarray
+    state_tail: np.ndarray | None = None
+
+
+class MotorPolicyController:
+    """Translate normalized policy outputs into short, fail-safe motor pulses."""
+
+    def __init__(
+        self,
+        url: str,
+        action_indices: list[int],
+        *,
+        left_max: float = 0.25,
+        right_min: float = 0.75,
+        timeout: float = 0.25,
+    ) -> None:
+        self.url = url
+        self.action_indices = action_indices
+        self.left_max = left_max
+        self.right_min = right_min
+        self.timeout = timeout
+        self.current_value = 0.5
+        self.active_action = "stop"
+        self._timer: threading.Timer | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.action_indices)
+
+    def pulse(self, policy_action: np.ndarray, hold_seconds: float) -> str:
+        if not self.enabled:
+            return "stop"
+        values = np.asarray(policy_action, dtype=np.float32)[self.action_indices]
+        value = float(np.mean(values))
+        if float(np.max(values) - np.min(values)) > 0.35:
+            action = "stop"
+            value = 0.5
+        elif value <= self.left_max:
+            action = "left"
+            value = 0.0
+        elif value >= self.right_min:
+            action = "right"
+            value = 1.0
+        else:
+            action = "stop"
+            value = 0.5
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            self._send(action)
+            self.active_action = action
+            self.current_value = value
+            if action != "stop":
+                self._timer = threading.Timer(max(0.05, hold_seconds), self.stop)
+                self._timer.daemon = True
+                self._timer.start()
+        return action
+
+    def stop(self) -> None:
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            if self.enabled and self.active_action != "stop":
+                self._send("stop")
+            self.active_action = "stop"
+            self.current_value = 0.5
+
+    def _send(self, action: str) -> None:
+        body = json.dumps({"action": action}, separators=(",", ":")).encode("utf-8")
+        req = request.Request(
+            self.url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=self.timeout) as response:
+                response.read()
+        except (OSError, error.URLError, TimeoutError) as exc:
+            raise RuntimeError(f"motor policy command failed: action={action}, error={exc}") from exc
+
+
+def configure_policy_layout(args: argparse.Namespace) -> MotorPolicyController:
+    tail_text = str(getattr(args, "state_tail_values", "") or "").strip()
+    if tail_text:
+        try:
+            tail = np.asarray([float(value.strip()) for value in tail_text.split(",")], dtype=np.float32)
+        except ValueError as exc:
+            raise ValueError("--state-tail-values must be comma-separated numbers") from exc
+    else:
+        tail_count = int(getattr(args, "state_tail_zeros", 0))
+        if tail_count < 0:
+            raise ValueError("--state-tail-zeros must be >= 0")
+        tail = np.zeros(tail_count, dtype=np.float32)
+    index_text = str(getattr(args, "motor_action_indices", "") or "").strip()
+    try:
+        indices = [int(value.strip()) for value in index_text.split(",") if value.strip()]
+    except ValueError as exc:
+        raise ValueError("--motor-action-indices must be comma-separated integers") from exc
+    expected_dim = 14 + len(tail)
+    if any(index < 14 or index >= expected_dim for index in indices):
+        raise ValueError(
+            f"--motor-action-indices must be within the state tail [14,{expected_dim - 1}]"
+        )
+    for index in indices:
+        tail[index - 14] = 0.5
+    motor_url = str(getattr(args, "motor_control_url", "") or "").strip()
+    left_max = float(getattr(args, "motor_left_max", 0.25))
+    right_min = float(getattr(args, "motor_right_min", 0.75))
+    if indices and not motor_url.startswith(("http://", "https://")):
+        raise ValueError("--motor-control-url must be an http(s) URL when motor control is enabled")
+    if not 0.0 <= left_max < right_min <= 1.0:
+        raise ValueError("motor thresholds must satisfy 0 <= left-max < right-min <= 1")
+    args._state_tail = tail
+    args._expected_real_action_dim = expected_dim
+    return MotorPolicyController(
+        motor_url,
+        indices,
+        left_max=left_max,
+        right_min=right_min,
+    )
+
+
+def attach_policy_state(obs: Observation, args: argparse.Namespace, motor: MotorPolicyController) -> None:
+    tail = np.asarray(getattr(args, "_state_tail", np.empty(0)), dtype=np.float32).copy()
+    for index in motor.action_indices:
+        tail[index - 14] = motor.current_value
+    obs.state_tail = tail
 
 
 def to_jsonable(value: Any) -> Any:
@@ -647,7 +777,9 @@ def encode_image(image: np.ndarray, jpeg_quality: int) -> dict[str, str]:
 
 def model_state_vector(obs: Observation, state_tail_zeros: int) -> list[float]:
     state = obs.state.astype(np.float32)
-    if state_tail_zeros > 0:
+    if obs.state_tail is not None:
+        state = np.concatenate([state, np.asarray(obs.state_tail, dtype=np.float32)])
+    elif state_tail_zeros > 0:
         state = np.concatenate([state, np.zeros(state_tail_zeros, dtype=np.float32)])
     return state.tolist()
 
@@ -710,19 +842,20 @@ def request_actions(args: argparse.Namespace, obs_history: list[Observation]) ->
 
 
 def validate_actions(actions: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+    expected_dim = int(getattr(args, "_expected_real_action_dim", 14))
     if actions.ndim != 2:
-        raise ValueError(f"expected [T,14] H2 actions, got {actions.shape}")
-    if actions.shape[1] != 14:
-        if args.extra_action_dims_policy == "crop" and actions.shape[1] > 14:
-            ignored = actions[:, 14:]
+        raise ValueError(f"expected [T,{expected_dim}] H2 policy actions, got {actions.shape}")
+    if actions.shape[1] != expected_dim:
+        if args.extra_action_dims_policy == "crop" and actions.shape[1] > expected_dim:
+            ignored = actions[:, expected_dim:]
             print(
-                f"[WARN] cropping action dim {actions.shape[1]} -> 14; "
+                f"[WARN] cropping action dim {actions.shape[1]} -> {expected_dim}; "
                 f"ignored_tail_min={float(np.min(ignored)):.4f} ignored_tail_max={float(np.max(ignored)):.4f}",
                 flush=True,
             )
-            actions = actions[:, :14]
+            actions = actions[:, :expected_dim]
         else:
-            raise ValueError(f"expected [T,14] H2 actions, got {actions.shape}")
+            raise ValueError(f"expected [T,{expected_dim}] H2 policy actions, got {actions.shape}")
     if actions.shape[0] < 1:
         raise ValueError("policy returned empty action horizon")
     if not np.all(np.isfinite(actions)):
@@ -736,7 +869,7 @@ def validate_actions(actions: np.ndarray, args: argparse.Namespace) -> np.ndarra
 def controlled_delta_by_index(actions: np.ndarray, state: np.ndarray, control_arm: str) -> list[float]:
     deltas: list[float] = []
     for action in actions:
-        selected = keep_selected_arm(action, state, control_arm)
+        selected = keep_selected_arm(action[:14], state, control_arm)
         deltas.append(float(np.max(np.abs(selected - state))))
     return deltas
 
@@ -1085,14 +1218,16 @@ def execute_chunk(
     *,
     step: int,
     action_start_index: int | None = None,
+    motor_controller: MotorPolicyController | None = None,
 ) -> np.ndarray:
     period = 1.0 / args.control_freq
     last_command: np.ndarray | None = None
     start_index = args.action_start_index if action_start_index is None else action_start_index
     end_index = min(actions.shape[0], start_index + args.exe_steps)
-    for action_idx, raw_action in enumerate(actions[start_index:end_index], start=start_index):
+    for action_idx, policy_action in enumerate(actions[start_index:end_index], start=start_index):
         started = time.monotonic()
         current = arm_client.read_arm_q()
+        raw_action = np.asarray(policy_action[:14], dtype=np.float32)
         selected = keep_selected_arm(raw_action, current, args.control_arm)
         raw_delta_max = float(np.max(np.abs(selected - current)))
         if args.reject_action_delta > 0.0 and raw_delta_max > args.reject_action_delta:
@@ -1141,6 +1276,13 @@ def execute_chunk(
             )
         last_command = command.copy()
         print(f"[EXEC] step={step} action_idx={action_idx} target={np.round(command, 4).tolist()}", flush=True)
+        if motor_controller is not None and motor_controller.enabled:
+            motor_action = motor_controller.pulse(policy_action, 1.0 / args.control_freq)
+            print(
+                f"[MOTOR] step={step} action_idx={action_idx} action={motor_action} "
+                f"indices={motor_controller.action_indices}",
+                flush=True,
+            )
         holder.set_target(command, weight=1.0)
         arrival_enabled = args.action_arrival_tolerance > 0.0
         arrival_ok = not arrival_enabled
@@ -1362,7 +1504,8 @@ def restore_start_pose(
 
 
 def print_action_summary(step: int, state: np.ndarray, actions: np.ndarray) -> None:
-    first_delta = actions[0] - state
+    arm_actions = actions[:, :14]
+    first_delta = arm_actions[0] - state
     print(
         f"[STEP {step}] state_min={state.min():.4f} state_max={state.max():.4f} "
         f"action_min={actions.min():.4f} action_max={actions.max():.4f} "
@@ -1372,24 +1515,24 @@ def print_action_summary(step: int, state: np.ndarray, actions: np.ndarray) -> N
     )
     print("[ACTION TABLE] right arm horizon summary", flush=True)
     for offset, name in enumerate(ARM_NAMES[7:], start=7):
-        values = actions[:, offset]
+        values = arm_actions[:, offset]
         print(
             f"  {name:<20s} state={state[offset]: .4f} "
-            f"first={actions[0, offset]: .4f} last={actions[-1, offset]: .4f} "
+            f"first={arm_actions[0, offset]: .4f} last={arm_actions[-1, offset]: .4f} "
             f"min={values.min(): .4f} max={values.max(): .4f} "
-            f"first_delta={actions[0, offset] - state[offset]: .4f} "
-            f"last_delta={actions[-1, offset] - state[offset]: .4f}",
+            f"first_delta={arm_actions[0, offset] - state[offset]: .4f} "
+            f"last_delta={arm_actions[-1, offset] - state[offset]: .4f}",
             flush=True,
         )
     print("[ACTION TABLE] left arm horizon summary", flush=True)
     for offset, name in enumerate(ARM_NAMES[:7]):
-        values = actions[:, offset]
+        values = arm_actions[:, offset]
         print(
             f"  {name:<20s} state={state[offset]: .4f} "
-            f"first={actions[0, offset]: .4f} last={actions[-1, offset]: .4f} "
+            f"first={arm_actions[0, offset]: .4f} last={arm_actions[-1, offset]: .4f} "
             f"min={values.min(): .4f} max={values.max(): .4f} "
-            f"first_delta={actions[0, offset] - state[offset]: .4f} "
-            f"last_delta={actions[-1, offset] - state[offset]: .4f}",
+            f"first_delta={arm_actions[0, offset] - state[offset]: .4f} "
+            f"last_delta={arm_actions[-1, offset] - state[offset]: .4f}",
             flush=True,
         )
 
@@ -1426,6 +1569,19 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Append this many zero values to the model state vector, e.g. rubber EE dims.",
     )
+    parser.add_argument(
+        "--state-tail-values",
+        default="",
+        help="Comma-separated state tail defaults. Use 0.5 for each motor direction dimension.",
+    )
+    parser.add_argument(
+        "--motor-action-indices",
+        default="",
+        help="Comma-separated absolute policy action indices for the motor, from dataset metadata.",
+    )
+    parser.add_argument("--motor-control-url", default="http://127.0.0.1:18099/api/motor/control")
+    parser.add_argument("--motor-left-max", type=float, default=0.25)
+    parser.add_argument("--motor-right-min", type=float, default=0.75)
     parser.add_argument(
         "--extra-action-dims-policy",
         choices=["reject", "crop"],
@@ -1684,6 +1840,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _request_shutdown)
     signal.signal(signal.SIGINT, _request_shutdown)
     args = parse_args()
+    motor_controller = configure_policy_layout(args)
     if args.execute and not args.confirm_execute:
         raise SystemExit("Refusing to execute: pass both --execute and --confirm-execute")
     if args.steps <= 0:
@@ -1860,6 +2017,7 @@ def main() -> int:
     try:
         for step in range(args.steps):
             obs = read_observation(image_client, arm_client, args)
+            attach_policy_state(obs, args, motor_controller)
             obs_history.append(obs)
             if len(obs_history) > args.observation_horizon:
                 obs_history = obs_history[-args.observation_horizon :]
@@ -1888,8 +2046,8 @@ def main() -> int:
                 image=image_stats(obs.image),
                 left_wrist_image=image_stats(obs.left_wrist_image),
                 right_wrist_image=image_stats(obs.right_wrist_image),
-                first_delta=actions[0] - obs.state,
-                last_delta=actions[min(len(actions), args.exe_steps) - 1] - obs.state,
+                first_delta=actions[0, :14] - obs.state,
+                last_delta=actions[min(len(actions), args.exe_steps) - 1, :14] - obs.state,
             )
             if args.execute:
                 if holder is None:
@@ -1901,6 +2059,7 @@ def main() -> int:
                     args,
                     step=step,
                     action_start_index=action_start_index,
+                    motor_controller=motor_controller,
                 )
         if args.execute and first_state is not None and last_target is not None:
             if holder is not None:
@@ -1966,6 +2125,10 @@ def main() -> int:
                 print(f"[WARN] arm_sdk release failed after error: {release_exc!r}", flush=True)
         raise
     finally:
+        try:
+            motor_controller.stop()
+        except Exception as motor_stop_exc:
+            print(f"[WARN] motor stop failed: {motor_stop_exc!r}", flush=True)
         try:
             image_client.close()
         except Exception as close_exc:

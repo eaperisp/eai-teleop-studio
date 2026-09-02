@@ -10,13 +10,13 @@ Typical workflow on the camera host:
       --torso-serial CPCBC530002E \
       --left-serial CP0F463000HS \
       --right-serial CP06563000E6 \
-      --depth all \
+      --depth head torso \
       --color-size 640x480 \
       --head-depth-size 848x480 \
       -o teleop/teleimager/cam_config_server.yaml
 
-Use --depth none for RGB-only config, --depth head for head RGB-D only, and
---depth all for head/torso/left-wrist/right-wrist RGB-D streams. Generated
+Use --depth none for RGB-only config, list one or more camera roles such as
+--depth head torso, or use --depth all for all four RGB-D streams. Generated
 RGB-D streams are enabled for ZMQ by default.
 
 The generated config uses stable selectors:
@@ -399,8 +399,14 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--color-size", type=parse_size, default=(640, 480), help="RGB size WIDTHxHEIGHT. Default: 640x480.")
     parser.add_argument("--head-color-size", type=parse_size, help="Override RGB size for head_camera.")
+    parser.add_argument("--torso-color-size", type=parse_size, help="Override RGB size for torso_camera.")
+    parser.add_argument("--left-color-size", type=parse_size, help="Override RGB size for left_wrist_camera.")
+    parser.add_argument("--right-color-size", type=parse_size, help="Override RGB size for right_wrist_camera.")
     parser.add_argument("--depth-size", type=parse_size, default=(640, 480), help="Depth size WIDTHxHEIGHT. Default: 640x480.")
     parser.add_argument("--head-depth-size", type=parse_size, help="Override depth size for head_rgbd_camera.depth.")
+    parser.add_argument("--torso-depth-size", type=parse_size, help="Override depth size for torso_rgbd_camera.depth.")
+    parser.add_argument("--left-depth-size", type=parse_size, help="Override depth size for left_wrist_rgbd_camera.depth.")
+    parser.add_argument("--right-depth-size", type=parse_size, help="Override depth size for right_wrist_rgbd_camera.depth.")
     parser.add_argument("--color-fps", type=int, default=30)
     parser.add_argument("--depth-fps", type=int, default=30)
 
@@ -410,9 +416,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefer-depth-index", type=int, default=0)
     parser.add_argument(
         "--depth",
-        choices=("none", "head", "all"),
-        default="head",
-        help="Which RGB-D configs to generate: none, head, or all four cameras. Default: head.",
+        nargs="+",
+        choices=("none", "head", "torso", "left", "right", "all"),
+        default=["head"],
+        metavar="ROLE",
+        help=(
+            "RGB-D camera roles to generate and enable: none, head, torso, left, right, or all. "
+            "Multiple roles are supported, for example: --depth head torso. Default: head."
+        ),
     )
     return parser.parse_args()
 
@@ -426,8 +437,24 @@ def required_serials(args: argparse.Namespace) -> dict[str, str | None]:
     }
 
 
+def selected_depth_roles(value: str | list[str] | tuple[str, ...]) -> set[str]:
+    values = {value} if isinstance(value, str) else set(value)
+    if "none" in values and len(values) > 1:
+        raise SystemExit("--depth none cannot be combined with other camera roles.")
+    if "all" in values:
+        return set(CAMERA_LABELS.values())
+    role_labels = {
+        "head": "head",
+        "torso": "torso",
+        "left": "left_wrist",
+        "right": "right_wrist",
+    }
+    return {role_labels[role] for role in values if role != "none"}
+
+
 def build_config(args: argparse.Namespace, nodes: list[VideoNode]) -> list[tuple[str, dict[str, object]]]:
     serials = required_serials(args)
+    depth_roles = selected_depth_roles(args.depth)
     missing_roles = [name for name, serial in serials.items() if not serial]
     if missing_roles and not args.allow_missing:
         raise SystemExit(
@@ -437,9 +464,21 @@ def build_config(args: argparse.Namespace, nodes: list[VideoNode]) -> list[tuple
         )
 
     blocks: list[tuple[str, dict[str, object]]] = []
+    color_size_overrides = {
+        "head_camera": getattr(args, "head_color_size", None),
+        "torso_camera": getattr(args, "torso_color_size", None),
+        "left_wrist_camera": getattr(args, "left_color_size", None),
+        "right_wrist_camera": getattr(args, "right_color_size", None),
+    }
+    depth_size_overrides = {
+        "head_camera": getattr(args, "head_depth_size", None),
+        "torso_camera": getattr(args, "torso_depth_size", None),
+        "left_wrist_camera": getattr(args, "left_depth_size", None),
+        "right_wrist_camera": getattr(args, "right_depth_size", None),
+    }
     for camera_name in CAMERA_ORDER:
         serial = serials[camera_name] or "UNKNOWN"
-        color_size = args.head_color_size if camera_name == "head_camera" and args.head_color_size else args.color_size
+        color_size = color_size_overrides[camera_name] or args.color_size
         color_node = pick_node(
             nodes,
             serial,
@@ -485,9 +524,9 @@ def build_config(args: argparse.Namespace, nodes: list[VideoNode]) -> list[tuple
             )
         )
 
-        if args.depth == "all" or (args.depth == "head" and camera_name == "head_camera"):
+        if CAMERA_LABELS[camera_name] in depth_roles:
             rgbd_name = rgbd_name_for_color(camera_name)
-            depth_size = args.head_depth_size if rgbd_name == "head_rgbd_camera" and args.head_depth_size else args.depth_size
+            depth_size = depth_size_overrides[camera_name] or args.depth_size
             depth_node = pick_node(
                 nodes,
                 serial,

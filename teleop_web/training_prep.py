@@ -257,6 +257,10 @@ class TrainingPrepManager:
             "camera_plan": metadata.get("camera_plan") or {},
             "camera_preset": metadata.get("camera_preset") or "",
             "vector_dims": metadata.get("vector_dims") or [],
+            "vector_layout": metadata.get("vector_layout") or [],
+            "end_effector_types": metadata.get("end_effector_types") or {},
+            "motor_action_indices": metadata.get("motor_action_indices") or [],
+            "state_defaults": metadata.get("state_defaults") or [],
             "image_size": metadata.get("image_size") or "",
             "repo_path": str(root),
         }
@@ -407,6 +411,7 @@ class TrainingPrepManager:
         config_name = str(raw.get("config_name") or f"pi05_{name}").strip()
         if not CONFIG_NAME_RE.match(config_name):
             raise TrainingPrepError("OpenPI config-name 格式不正确")
+        dataset_action_dim = self._profiles_action_dim(profiles)
         training_set = {
             "id": uuid.uuid4().hex[:12],
             "name": name,
@@ -423,7 +428,7 @@ class TrainingPrepManager:
             "checkpoint_base_dir": str(raw.get("checkpoint_base_dir") or "/home/ubuntu/models/openpi/checkpoints"),
             "action_dim": _int_value(raw.get("action_dim"), 32),
             "real_action_dim": _int_value(
-                raw.get("real_action_dim"),
+                dataset_action_dim if dataset_action_dim is not None else raw.get("real_action_dim"),
                 (profiles[0].get("metadata", {}).get("action_dim") if profiles else None) or 14,
             ),
             "action_horizon": _int_value(raw.get("action_horizon"), 16),
@@ -508,6 +513,9 @@ class TrainingPrepManager:
             "action_horizon": _int_value(raw.get("action_horizon"), _safe_int(current.get("action_horizon"), 16)),
             "updated_at": _now(),
         })
+        dataset_action_dim = self._profiles_action_dim(current.get("profiles") or [])
+        if dataset_action_dim is not None:
+            current["real_action_dim"] = dataset_action_dim
         current["norm_stats_dir"] = str(self._training_norm_dir(current))
         after_norm_key = (
             current.get("name"),
@@ -541,6 +549,15 @@ class TrainingPrepManager:
             "lerobot_frames": profile.get("lerobot_frames"),
         }
 
+    @staticmethod
+    def _profiles_action_dim(profiles: list[dict[str, Any]]) -> int | None:
+        dims = {
+            int(profile.get("metadata", {}).get("action_dim"))
+            for profile in profiles
+            if profile.get("metadata", {}).get("action_dim")
+        }
+        return next(iter(dims)) if len(dims) == 1 else None
+
     def _update_training_set_from_profiles(self, training_set: dict[str, Any], profiles: list[dict[str, Any]]) -> dict[str, Any]:
         updated = dict(training_set)
         previous_task_ids = [str(task.get("task_id")) for task in updated.get("tasks") or []]
@@ -549,6 +566,9 @@ class TrainingPrepManager:
         updated["tasks"] = [self._task_entry(profile) for profile in profiles]
         updated["profiles"] = profiles
         updated["compatibility"] = self.compatibility(profiles)
+        dataset_action_dim = self._profiles_action_dim(profiles)
+        if dataset_action_dim is not None:
+            updated["real_action_dim"] = dataset_action_dim
         updated["norm_stats_dir"] = str(self._training_norm_dir(updated))
         if previous_task_ids != next_task_ids:
             updated["norm_stats_stale"] = bool(next_task_ids)

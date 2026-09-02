@@ -1,6 +1,6 @@
 """Shared end-effector names and validation rules."""
 
-PASSIVE_END_EFFECTORS = frozenset({"none", "rubber"})
+PASSIVE_END_EFFECTORS = frozenset({"none", "rubber", "motor"})
 
 END_EFFECTOR_ALIASES = {
     "inspire": "inspire_ftp",
@@ -16,7 +16,7 @@ ACTIVE_END_EFFECTORS = frozenset({
     "brainco",
 })
 
-DISPLAY_END_EFFECTORS = ("dex1", "dex3", "inspire", "inspire_ftp", "inspire_dfx", "brainco")
+DISPLAY_END_EFFECTORS = ("dex1", "dex3", "inspire", "inspire_ftp", "inspire_dfx", "brainco", "motor")
 SIDE_END_EFFECTORS = ("none", "rubber", *DISPLAY_END_EFFECTORS)
 
 # Every active controller must support side isolation. A passive peer therefore

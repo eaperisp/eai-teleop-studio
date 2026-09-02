@@ -1,7 +1,7 @@
 [Unit]
 Description=XR Teleoperate Web Console
-After=network-online.target
-Wants=network-online.target
+After=network-online.target can0.service
+Wants=network-online.target can0.service
 
 [Service]
 Type=simple

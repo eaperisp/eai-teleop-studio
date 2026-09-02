@@ -11,6 +11,8 @@ import sys
 import cv2
 import json
 import numpy as np
+import urllib.error
+import urllib.request
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 for import_dir in (
@@ -71,6 +73,70 @@ RECORD_TOGGLE  = False  # Toggle recording state
 EXTERNAL_ARM_TARGET = None
 EXTERNAL_ARM_TARGET_LOCK = threading.Lock()
 EXTERNAL_ARM_TARGET_TIMEOUT = 0.5
+
+
+class MotorButtonController:
+    def __init__(self, enabled: bool, url: str, timeout: float = 0.25) -> None:
+        self.enabled = enabled
+        self.url = url
+        self.timeout = timeout
+        self.active_action = "stop"
+        self.direction_value = 0.5
+        self.last_error_log_time = 0.0
+
+    def update(self, tele_data) -> None:
+        if not self.enabled:
+            return
+        trigger_pressed = bool(getattr(tele_data, "left_ctrl_trigger", False) or getattr(tele_data, "right_ctrl_trigger", False))
+        squeeze_pressed = bool(getattr(tele_data, "left_ctrl_squeeze", False) or getattr(tele_data, "right_ctrl_squeeze", False))
+        action = self.action_from_buttons(trigger_pressed, squeeze_pressed)
+        self.direction_value = self.direction_from_action(action)
+        if action == self.active_action:
+            return
+        if self._send(action):
+            self.active_action = action
+
+    @staticmethod
+    def action_from_buttons(trigger_pressed: bool, squeeze_pressed: bool) -> str:
+        if trigger_pressed and not squeeze_pressed:
+            return "left"
+        if squeeze_pressed and not trigger_pressed:
+            return "right"
+        return "stop"
+
+    @staticmethod
+    def direction_from_action(action: str) -> float:
+        if action == "left":
+            return 0.0
+        if action == "right":
+            return 1.0
+        return 0.5
+
+    def stop(self) -> None:
+        self.direction_value = 0.5
+        if self.enabled and self.active_action != "stop":
+            self._send("stop")
+            self.active_action = "stop"
+
+    def _send(self, action: str) -> bool:
+        payload = json.dumps({"action": action}).encode("utf-8")
+        request = urllib.request.Request(
+            self.url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                response.read()
+            logger_mp.info(f"PICO motor button command sent: action={action}")
+            return True
+        except (OSError, urllib.error.URLError, TimeoutError) as exc:
+            now = time.time()
+            if now - self.last_error_log_time >= 1.0:
+                self.last_error_log_time = now
+                logger_mp.warning(f"PICO motor button command failed: action={action}, error={exc}")
+            return False
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -403,6 +469,10 @@ if __name__ == '__main__':
                         help='POST URL for IK replay live state, e.g. http://192.168.61.228:8000/api/live/state.')
     parser.add_argument('--ik-replay-live-fps', type=float, default=float(os.environ.get('IK_REPLAY_LIVE_FPS', '10')),
                         help='Max live-state push frequency when IK replay live push is enabled.')
+    parser.add_argument('--motor-button-control', action='store_true',
+                        help='Map PICO trigger to motor left rotation and squeeze to motor right rotation; release or pressing both stops the motor.')
+    parser.add_argument('--motor-control-url', type=str, default=os.environ.get('XR_TELEOP_MOTOR_CONTROL_URL', 'http://127.0.0.1:18099/api/motor/control'),
+                        help='Local web API endpoint used by --motor-button-control.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
@@ -466,6 +536,7 @@ if __name__ == '__main__':
     init_arm_q = None
     init_locked_joint_targets = {}
     ik_replay_pusher = None
+    motor_button_controller = None
 
     try:
         # setup dds communication domains id
@@ -558,6 +629,14 @@ if __name__ == '__main__':
         webrtc_server_ip = args.webrtc_server_ip or args.img_server_ip
         webrtc_url = f"{args.webrtc_scheme}://{webrtc_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer"
         logger_mp.info(f"XR WebRTC video URL: {webrtc_url}")
+        motor_button_controller = MotorButtonController(
+            enabled=bool(args.motor_button_control and args.input_mode == "controller"),
+            url=args.motor_control_url,
+        )
+        if args.motor_button_control and args.input_mode != "controller":
+            logger_mp.warning("PICO motor button control is ignored because input_mode is not controller.")
+        elif motor_button_controller.enabled:
+            logger_mp.info("PICO motor buttons enabled: trigger=left rotation, squeeze=right rotation, release/both=stop.")
         tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand", 
                                      binocular=xr_binocular,
                                      img_shape=xr_display_shape,
@@ -731,6 +810,10 @@ if __name__ == '__main__':
                                      task_steps = args.task_steps,
                                      frequency = args.frequency, 
                                      rerun_log = not args.headless)
+            if left_ee == "motor":
+                recorder.info["joint_names"]["left_ee"] = ["motor_direction"]
+            if right_ee == "motor":
+                recorder.info["joint_names"]["right_ee"] = ["motor_direction"]
 
         if args.ik_replay_live_enable and args.ik_replay_live_url.strip():
             ik_replay_pusher = IKReplayLivePusher(
@@ -854,6 +937,7 @@ if __name__ == '__main__':
 
             control_input_ready = tele_data.motion_data_ready or external_arm_target is not None
             if not tele_data.motion_data_ready and external_arm_target is None:
+                motor_button_controller.stop()
                 waiting_motion_log_count += 1
                 if waiting_motion_log_count % max(1, int(args.frequency)) == 0:
                     logger_mp.warning(
@@ -869,6 +953,7 @@ if __name__ == '__main__':
              
             # high level control
             if args.input_mode == "controller" and args.motion and tele_data.motion_data_ready:
+                motor_button_controller.update(tele_data)
                 # quit teleoperate
                 if tele_data.right_ctrl_aButton:
                     START = False
@@ -985,6 +1070,14 @@ if __name__ == '__main__':
                     right_hand_action = []
                     current_body_state = []
                     current_body_action = []
+                if motor_button_controller is not None and motor_button_controller.enabled:
+                    motor_direction = float(motor_button_controller.direction_value)
+                    if left_ee == "motor":
+                        left_ee_state = [motor_direction]
+                        left_hand_action = [motor_direction]
+                    if right_ee == "motor":
+                        right_ee_state = [motor_direction]
+                        right_hand_action = [motor_direction]
 
                 # arm state and action
                 left_arm_state  = current_lr_arm_q[:7]
@@ -1084,6 +1177,12 @@ if __name__ == '__main__':
         import traceback
         logger_mp.error(traceback.format_exc())
     finally:
+        try:
+            if motor_button_controller is not None:
+                motor_button_controller.stop()
+        except Exception as e:
+            logger_mp.error(f"Failed to stop PICO motor button control: {e}")
+
         try:
             if args.arm == "H2":
                 if init_arm_q is not None:

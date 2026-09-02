@@ -67,16 +67,20 @@ def main() -> int:
         raise RuntimeError(f"Camera '{args.camera_name}' is not an rgbd stream: {rgbd_cfg}")
 
     latest_frame = None
-    start = time.monotonic()
-    for idx in range(max(1, args.frames)):
+    received_frames = 0
+    last_frame_at = time.monotonic()
+    requested_frames = max(1, args.frames)
+    while received_frames < requested_frames:
         frame = client.get_rgbd_frame(args.camera_name)
         if not frame or frame.bgr is None or frame.depth is None:
-            if time.monotonic() - start > args.timeout:
+            if time.monotonic() - last_frame_at > args.timeout:
                 raise TimeoutError(f"No valid RGB-D frame received from '{args.camera_name}' within {args.timeout:.1f}s.")
             time.sleep(0.02)
             continue
 
         latest_frame = frame
+        received_frames += 1
+        last_frame_at = time.monotonic()
         valid = frame.depth[frame.depth > 0]
         if valid.size:
             depth_stats = f"depth_min={int(valid.min())} depth_max={int(valid.max())} depth_mean={float(valid.mean()):.1f}"
@@ -84,7 +88,7 @@ def main() -> int:
             depth_stats = "no non-zero depth pixels"
         metadata = frame.metadata or {}
         print(
-            f"[{idx + 1}/{args.frames}] fps={frame.fps:.1f} "
+            f"[{received_frames}/{requested_frames}] fps={frame.fps:.1f} "
             f"frame_id={metadata.get('frame_id')} timestamp_ns={metadata.get('timestamp_ns')} "
             f"rgb_shape={frame.bgr.shape} depth_shape={frame.depth.shape} {depth_stats}"
         )

@@ -14,6 +14,7 @@
       <button class="nav-item active" data-view="devices"><span>⚙</span>设备管理</button>
       <div class="nav-group"><span>⌁</span>设备调试</div>
       <button class="nav-item sub" data-view="motorDebug"><span>◉</span>电机调试助手</button>
+      <button class="nav-item sub" data-view="handDebug"><span>◇</span>灵巧手调试助手</button>
       <div class="nav-group"><span>▦</span>数据管理</div>
       <button class="nav-item sub" data-view="tasks"><span>●</span>数据采集</button>
       <button class="nav-item sub" data-view="dataList"><span>▤</span>数据列表</button>
@@ -47,8 +48,8 @@
           <div class="form-grid">
             <label><span>设备名称</span><input name="name" placeholder="H2_数据采集" maxlength="64" required></label>
             <label><span>机器人型号</span><select name="arm"><option>H2</option><option>G1_29</option><option>G1_23</option><option>H1_2</option><option>H1</option></select></label>
-            <label><span>左手末端执行器</span><select name="left_ee"><option value="none">不控制</option><option value="rubber">橡胶手</option><option>inspire_dfx</option><option>inspire_ftp</option><option>dex3</option><option>dex1</option><option>brainco</option></select><small id="eeHint">主动末端需要 hand 模式</small></label>
-            <label><span>右手末端执行器</span><select name="right_ee"><option value="none">不控制</option><option value="rubber">橡胶手</option><option>inspire_dfx</option><option>inspire_ftp</option><option>dex3</option><option>dex1</option><option>brainco</option></select><small>左右不同主动手目前仅支持单侧主动、另一侧被动</small></label>
+            <label><span>左手末端执行器</span><select name="left_ee"><option value="none">不控制</option><option value="rubber">橡胶手</option><option value="motor">电机</option><option>inspire_dfx</option><option>inspire_ftp</option><option>dex3</option><option>dex1</option><option>brainco</option></select><small id="eeHint">主动末端需要 hand 模式</small></label>
+            <label><span>右手末端执行器</span><select name="right_ee"><option value="none">不控制</option><option value="rubber">橡胶手</option><option value="motor">电机</option><option>inspire_dfx</option><option>inspire_ftp</option><option>dex3</option><option>dex1</option><option>brainco</option></select><small>左右不同主动手目前仅支持单侧主动、另一侧被动</small></label>
             <label><span>输入模式</span><select name="input_mode"><option value="controller">手柄 controller</option><option value="hand">手部追踪 hand</option></select></label>
             <label><span>显示模式</span><select name="display_mode"><option value="immersive">沉浸 immersive</option><option value="ego">第一视角 ego</option><option value="pass-through">透视 pass-through</option></select></label>
             <label><span>VR 相机视角</span><select name="xr_view"><option value="head">仅头部相机 head</option><option value="quad">四路摄像头 quad</option></select><small>手势模式建议使用 pass-through 和 head，避免四路相机遮挡视野</small></label>
@@ -97,6 +98,18 @@
               <label><span>转动时间 s</span><input id="motorDurationSec" type="number" min="0.05" max="60" step="0.05" value="60"></label>
               <label><span>发送频率 Hz</span><input id="motorControlHz" type="number" min="5" max="200" step="1" value="50"></label>
             </div>
+            <div class="motor-hold-controls" aria-label="按住转动测试">
+              <button class="motor-hold-button" type="button" data-action="motor-hold" data-command="left" title="按住向左转动，松开停止" aria-label="按住向左转动">
+                <span aria-hidden="true">←</span>
+                <strong>向左转动</strong>
+                <small>按住运行</small>
+              </button>
+              <button class="motor-hold-button" type="button" data-action="motor-hold" data-command="right" title="按住向右转动，松开停止" aria-label="按住向右转动">
+                <span aria-hidden="true">→</span>
+                <strong>向右转动</strong>
+                <small>按住运行</small>
+              </button>
+            </div>
             <details class="motor-advanced-fields">
               <summary>输出调节</summary>
               <div>
@@ -119,6 +132,53 @@
         <section class="training-panel motor-debug-wide">
           <div class="training-panel-head"><div><h2>建议流程</h2><p>第一次接入新电机时按步骤推进，异常时先断电检查接线与 ID</p></div></div>
           <div id="motorGuidePanel" class="motor-guide-panel"></div>
+        </section>
+      </div>
+    </section>
+
+    <section id="handDebugView" class="view">
+      <div class="page-title">
+        <div><h1>灵巧手调试助手</h1><p>连接灵巧手，手动调试关节位置、执行姿态和停止动作</p></div>
+        <button id="handRefreshButton" class="primary" type="button" data-action="hand-refresh">刷新状态</button>
+      </div>
+      <div class="hand-debug-layout">
+        <section class="training-panel hand-debug-main">
+          <div class="training-panel-head">
+            <div><h2>调试配置</h2><p>仅集成手动调试能力，不包含视觉控制</p></div>
+            <span id="handDebugBadge" class="motor-debug-badge">未连接</span>
+          </div>
+          <div class="hand-debug-form">
+            <div class="motor-field-group hand-connection-group">
+              <div class="motor-field-group-head"><strong>连接参数</strong><span class="motor-inline-actions"><button class="action blue" type="button" data-action="hand-connect">连接灵巧手</button><button class="action red" type="button" data-action="hand-disconnect">断开连接</button></span></div>
+              <label><span>灵巧手型号</span><select id="handDeviceSelect"></select></label>
+              <label><span>通信方式</span><select id="handTransportSelect"></select></label>
+              <div id="handConnectionFields" class="hand-connection-fields"></div>
+            </div>
+            <div class="motor-field-group hand-command-group">
+              <div class="motor-field-group-head"><strong>姿态控制</strong><span class="motor-inline-actions"><button class="action blue" type="button" data-action="hand-command">执行姿态</button><button class="action red" type="button" data-action="hand-stop">停止</button></span></div>
+              <label><span>控制对象</span><select id="handSideSelect"><option value="right">右手</option><option value="left">左手</option></select></label>
+              <label><span>动作时长 ms</span><input id="handDurationMs" type="number" min="50" max="2000" step="50" value="500"></label>
+              <label class="hand-live-toggle"><span>实时发送</span><input id="handLiveToggle" type="checkbox"></label>
+            </div>
+            <div id="handJointPanel" class="hand-joint-panel"></div>
+          </div>
+        </section>
+        <aside class="hand-debug-sidebar">
+          <section class="training-panel">
+            <div class="training-panel-head"><div><h2>型号参数</h2><p>来自原灵巧手调试工具的设备注册信息</p></div></div>
+            <div id="handSpecPanel" class="motor-spec-panel"></div>
+          </section>
+          <section class="training-panel hand-preview-panel">
+            <div class="training-panel-head"><div><h2>姿态预览</h2><p>随目标关节位置实时更新</p></div><span id="handPreviewSide" class="hand-preview-side">右手</span></div>
+            <div id="handPreviewStage" class="hand-preview-stage" aria-label="当前手指位置三维预览">
+              <div id="handPreviewState" class="hand-preview-state">模型加载中</div>
+            </div>
+          </section>
+        </aside>
+        <section class="training-panel hand-debug-wide">
+          <div class="training-panel-head"><div><h2>调试摘要</h2><p>显示当前连接、目标关节和最近一次反馈</p></div></div>
+          <div class="command motor-command"><span>当前控制摘要</span><code id="handCommandText">—</code><button class="copy-icon-btn" title="复制" aria-label="复制" data-action="copy-target" data-target="handCommandText"><span></span></button></div>
+          <div id="handLogPanel" class="motor-log-panel"></div>
         </section>
       </div>
     </section>
@@ -322,6 +382,7 @@
     </div>
   </div>
 
-  <script src="/app.js?v=20260803-page-jump-input" defer></script>
+  <script src="/hand-preview.js?v=20260831-integrated-preview-2" defer></script>
+  <script src="/app.js?v=20260831-hand-sidebar-order" defer></script>
 </body>
 </html>

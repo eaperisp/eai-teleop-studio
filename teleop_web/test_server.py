@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from teleop_web.server import PROJECT_ROOT, TeleopManager, ValidationError, build_command, episode_progress, validate_device, validate_task
+from teleop_web.server import PROJECT_ROOT, DamiaoMotorDebug, TeleopManager, ValidationError, build_command, episode_progress, validate_device, validate_task
 
 
 class ValidationTests(unittest.TestCase):
@@ -85,6 +85,73 @@ class ValidationTests(unittest.TestCase):
         command = build_command(device, task, Path("/tmp/datasets"))
         self.assertFalse(any(argument.startswith("--ee=") for argument in command))
 
+    def test_motor_button_control_adds_runtime_flag(self):
+        device = validate_device({"input_mode": "controller", "ee": "none", "motor_button_control": True})
+        task = validate_task({
+            "name": "motor_button",
+            "instruction": "Control the door motor with PICO buttons",
+            "description": "PICO 手柄控制电机",
+        })
+        command = build_command(device, task, Path("/tmp/datasets"))
+        self.assertIn("--motor-button-control", command)
+
+    def test_motor_end_effector_enables_pico_button_control(self):
+        device = validate_device({"input_mode": "controller", "left_ee": "motor", "right_ee": "rubber"})
+        task = validate_task({
+            "name": "motor_end_effector",
+            "instruction": "Control the motor with PICO buttons",
+            "description": "电机末端执行器",
+        })
+        command = build_command(device, task, Path("/tmp/datasets"))
+        self.assertTrue(device["motor_button_control"])
+        self.assertIn("--left-ee=motor", command)
+        self.assertIn("--right-ee=rubber", command)
+        self.assertIn("--motor-button-control", command)
+
+    def test_motor_end_effector_from_legacy_ee_builds_side_arguments(self):
+        device = validate_device({"input_mode": "controller", "ee": "motor"})
+        task = validate_task({
+            "name": "motor_both_sides",
+            "instruction": "Control the motor with PICO buttons",
+            "description": "双侧电机配置",
+        })
+        command = build_command(device, task, Path("/tmp/datasets"))
+        self.assertEqual(device["left_ee"], "motor")
+        self.assertEqual(device["right_ee"], "motor")
+        self.assertIn("--left-ee=motor", command)
+        self.assertIn("--right-ee=motor", command)
+        self.assertIn("--motor-button-control", command)
+
+    def test_motor_end_effector_requires_controller_mode(self):
+        with self.assertRaises(ValidationError):
+            validate_device({"input_mode": "hand", "left_ee": "motor", "right_ee": "rubber"})
+
+    def test_motor_end_effector_rejects_active_hand_mix(self):
+        with self.assertRaises(ValidationError):
+            validate_device({"input_mode": "controller", "left_ee": "motor", "right_ee": "dex1"})
+
+    def test_motor_debug_reuses_config_for_button_actions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_file = Path(temp_dir) / "motor.json"
+            motor = DamiaoMotorDebug(config_file)
+            state = motor.configure({"turnSpeed": 3.5, "durationSec": 12, "kd": 4, "torque": 2})
+            self.assertEqual(state["config"]["turn_speed"], 3.5)
+            self.assertEqual(state["config"]["duration_s"], 12)
+            self.assertEqual(state["config"]["kd"], 4)
+            self.assertEqual(state["config"]["torque"], 2)
+            reused = motor._validate_config(None)
+            self.assertEqual(reused["turn_speed"], 3.5)
+            self.assertEqual(reused["duration_s"], 12)
+            self.assertEqual(reused["kd"], 4)
+            self.assertEqual(reused["torque"], 2)
+
+            restored = DamiaoMotorDebug(config_file)
+            self.assertEqual(restored.config["turn_speed"], 3.5)
+            self.assertEqual(restored.config["duration_s"], 12)
+            self.assertEqual(restored.config["kd"], 4)
+            self.assertEqual(restored.config["torque"], 2)
+            self.assertEqual(restored.state()["config_file"], str(config_file))
+
     def test_hand_tracking_without_adapter_omits_end_effector_argument(self):
         device = validate_device({"input_mode": "hand", "ee": "none"})
         task = validate_task({"name": "arm_only_hand_tracking", "description": "手部追踪仅控制机械臂"})
@@ -158,6 +225,36 @@ class ValidationTests(unittest.TestCase):
             })
             manager.start_task(state["tasks"][0]["id"])
         self.assertEqual(Path(popen.call_args.kwargs["cwd"]), Path(__file__).resolve().parents[1] / "teleop")
+
+    @patch("teleop_web.server.IpcBridge")
+    @patch("teleop_web.server.subprocess.Popen")
+    def test_motor_end_effector_connects_and_enables_before_start(self, popen, bridge_class):
+        process = MagicMock()
+        process.poll.return_value = None
+        process.pid = 123
+        process.stdout = []
+        popen.return_value = process
+        bridge_class.return_value.state.return_value = {"online": False}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = TeleopManager(root / "data" / "datasets" / "robot", root / "console.json")
+            manager.motor_control_url = "http://127.0.0.1:19000/api/motor/control"
+            calls = []
+            manager.motor_debug.connect = MagicMock(side_effect=lambda config: calls.append("connect") or {})
+            manager.motor_debug.control = MagicMock(side_effect=lambda action, config: calls.append(action) or {})
+            manager.save_device({
+                "name": "H2", "arm": "H2", "left_ee": "motor", "right_ee": "rubber",
+                "input_mode": "controller", "img_server_ip": "192.168.123.5",
+                "network_interface": "eth0", "data_dir": str(root / "data"),
+            })
+            state = manager.create_task({
+                "name": "motor_capture", "instruction": "Control the motor with PICO buttons",
+                "description": "电机采集", "target_episodes": 1,
+            })
+            manager.start_task(state["tasks"][0]["id"])
+        self.assertEqual(calls, ["connect", "enable"])
+        self.assertIn("--motor-button-control", manager.command)
+        self.assertIn("--motor-control-url=http://127.0.0.1:19000/api/motor/control", manager.command)
 
     def test_episode_progress_continues_after_highest_existing_id(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -247,7 +344,7 @@ class ValidationTests(unittest.TestCase):
             manager = TeleopManager(root / "datasets", root / "console.json")
             manager.save_device({
                 "name": "H2", "arm": "H2", "ee": "none",
-                "input_mode": "controller", "network_interface": "eth0",
+                "input_mode": "controller", "network_interface": "eth0", "data_dir": str(root / "data"),
             })
             state = manager.create_task({
                 "name": "pick_red_cup", "description": "拾取红色水杯", "target_episodes": 10,
@@ -274,10 +371,15 @@ class ValidationTests(unittest.TestCase):
 
             def request(self):
                 return {
-                    "head_camera": {"enable_zmq": True, "enable_webrtc": True, "webrtc_port": 60001, "zmq_port": 55555, "binocular": False},
+                    "head_camera": {
+                        "enable_zmq": True, "enable_webrtc": True, "webrtc_port": 60001, "zmq_port": 55555,
+                        "binocular": False, "serial_number": "CP0BB53000FS", "usb_interface": "1.4", "video_index": 0,
+                    },
                     "torso_camera": {"enable_zmq": True, "enable_webrtc": True, "webrtc_port": 60002, "zmq_port": 55556},
                     "left_wrist_camera": {"enable_zmq": True, "enable_webrtc": True, "webrtc_port": 60003, "zmq_port": 55557},
                     "right_wrist_camera": {"enable_zmq": True, "enable_webrtc": True, "webrtc_port": 60004, "zmq_port": 55558},
+                    "head_rgbd_camera": {"enable_zmq": True, "enable_webrtc": False, "webrtc_port": None, "zmq_port": 55560, "data_format": "rgbd"},
+                    "torso_rgbd_camera": {"enable_zmq": True, "enable_webrtc": False, "webrtc_port": None, "zmq_port": 55566, "data_format": "rgbd"},
                 }
 
             def close(self):
@@ -291,15 +393,18 @@ class ValidationTests(unittest.TestCase):
             "teleimager.image_client": fake_client,
         }):
             root = Path(directory)
-            manager = TeleopManager(root / "datasets", root / "console.json")
+            manager = TeleopManager(root / "data" / "datasets" / "robot", root / "console.json")
             manager.save_device({
                 "name": "H2", "arm": "H2", "ee": "none",
-                "input_mode": "controller", "network_interface": "eth0",
+                "input_mode": "controller", "network_interface": "eth0", "data_dir": str(root / "data"),
             })
             preview = manager.camera_preview()
 
         self.assertEqual([camera["record_colors"] for camera in preview["cameras"]], [
             ["color_0"], ["color_1"], ["color_2"], ["color_3"],
+        ])
+        self.assertEqual([camera["name"] for camera in preview["cameras"]], [
+            "head_camera", "torso_camera", "left_wrist_camera", "right_wrist_camera",
         ])
         self.assertEqual(preview["cameras"][0]["serial_number"], "CP0BB53000FS")
         self.assertEqual(preview["cameras"][0]["usb_interface"], "1.4")

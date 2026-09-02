@@ -23,8 +23,11 @@ from tools.h2_action_calibration import add_deployment_args  # noqa: E402
 from tools.h2_openpi_official_vla import (  # noqa: E402
     ArmSdkTargetHold,
     DEFAULT_TAU_RATE_LIMIT_CSV,
+    MotorPolicyController,
     Observation,
     OfficialH2ArmSdk,
+    attach_policy_state,
+    configure_policy_layout,
     execute_chunk,
     execute_pre_vla_trajectory,
     finalize_arm_safety_args,
@@ -172,6 +175,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fallback-image-width", type=int, default=640)
     parser.add_argument("--jpeg-quality", type=int, default=85)
     parser.add_argument("--state-tail-zeros", type=int, default=2)
+    parser.add_argument("--state-tail-values", default="")
+    parser.add_argument("--motor-action-indices", default="")
+    parser.add_argument("--motor-control-url", default="http://127.0.0.1:18099/api/motor/control")
+    parser.add_argument("--motor-left-max", type=float, default=0.25)
+    parser.add_argument("--motor-right-min", type=float, default=0.75)
     parser.add_argument("--extra-action-dims-policy", choices=["reject", "crop"], default="crop")
     parser.add_argument("--request-timeout", type=float, default=120.0)
     parser.add_argument("--observation-horizon", type=int, default=1)
@@ -253,6 +261,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _request_shutdown)
     signal.signal(signal.SIGINT, _request_shutdown)
     args = parse_args()
+    motor_controller = configure_policy_layout(args)
     if args.execute and not args.confirm_execute:
         raise SystemExit("Refusing to execute: pass both --execute and --confirm-execute")
     if args.steps <= 0 or args.offline_frame_stride < 0:
@@ -364,6 +373,7 @@ def main() -> int:
                 if image_client is None:
                     raise RuntimeError("internal error: image client not initialized")
                 obs = read_observation(image_client, arm_client, args)
+            attach_policy_state(obs, args, motor_controller)
             obs_history.append(obs)
             if len(obs_history) > args.observation_horizon:
                 obs_history = obs_history[-args.observation_horizon :]
@@ -388,7 +398,14 @@ def main() -> int:
             if args.execute:
                 if holder is None:
                     raise RuntimeError("internal error: holder not initialized")
-                last_target = execute_chunk(arm_client, holder, actions, args, step=step)
+                last_target = execute_chunk(
+                    arm_client,
+                    holder,
+                    actions,
+                    args,
+                    step=step,
+                    motor_controller=motor_controller,
+                )
 
         if args.execute and first_state is not None and last_target is not None:
             if holder is not None:
@@ -445,6 +462,10 @@ def main() -> int:
                 print(f"[WARN] arm_sdk release failed after error: {release_exc!r}", flush=True)
         raise
     finally:
+        try:
+            motor_controller.stop()
+        except Exception as motor_stop_exc:
+            print(f"[WARN] motor stop failed: {motor_stop_exc!r}", flush=True)
         if image_client is not None:
             try:
                 image_client.close()

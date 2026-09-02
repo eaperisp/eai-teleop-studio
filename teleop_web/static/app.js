@@ -47,10 +47,10 @@ const MOTOR_DEBUG_MODELS = [
     defaultTmax: 40,
     defaultTurnSpeed: 5,
     defaultDirection: 'left',
-    defaultDurationSec: 60,
+    defaultDurationSec: 10,
     defaultControlHz: 50,
     defaultTorque: 0,
-    defaultKd: 5.0,
+    defaultKd: 3.0,
     kpRange: [0, 500],
     kdRange: [0, 5],
     commandIds: {mit: 'CAN_ID', position: '0x100 + CAN_ID', velocity: '0x200 + CAN_ID', forcePosition: '0x300 + CAN_ID'},
@@ -64,6 +64,15 @@ if (motorDebugState.kd === 0.2 || motorDebugState.kd === 1.0) {
   localStorage.setItem('teleop.motorDebugState', JSON.stringify(motorDebugState));
 }
 let motorDebugLogs = JSON.parse(localStorage.getItem('teleop.motorDebugLogs') || '[]');
+let motorConfigSyncTimer = null;
+let lastSyncedMotorConfig = '';
+let activeMotorHoldButton = null;
+let activeMotorHoldCommand = '';
+let motorHoldPointerId = null;
+let handDebugState = JSON.parse(localStorage.getItem('teleop.handDebugState') || '{}');
+let handDebugLogs = JSON.parse(localStorage.getItem('teleop.handDebugLogs') || '[]');
+let handLiveTimer = null;
+let handModelPreview = null;
 const TASK_PAGE_SIZE = 10;
 let dataPreviewState = {preview:null,index:0,taskId:null,episode:null};
 let dataListState = {taskId:'',page:1,pageSize:50,total:0,episodes:[],tasks:[],loading:false};
@@ -238,7 +247,11 @@ async function api(path, payload) {
       : (text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() || `请求失败 (${response.status})`);
     result = {error: fallback};
   }
-  if (!response.ok) throw new Error(result.error || `请求失败 (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(result.error || `请求失败 (${response.status})`);
+    error.payload = result;
+    throw error;
+  }
   return result;
 }
 function formatTime(value) {
@@ -289,7 +302,9 @@ function renderCameraPreview() {
     cameraPreviewKey = '';
     return;
   }
-  const cameras = (preview.cameras || []).filter(camera => camera.enable_webrtc || camera.url);
+  const cameras = (preview.cameras || []).filter(camera =>
+    (camera.data_format || 'jpeg') === 'jpeg' && (camera.enable_webrtc || camera.url)
+  );
   if (!cameras.length) {
     hint.textContent = appState.process?.running ? '当前相机配置没有可预览的 WebRTC 流' : '开始采集后显示 WebRTC 相机流';
     panel.innerHTML = '';
@@ -432,7 +447,7 @@ function detailItem(label, value, extraClass = '') {
   return `<div class="${extraClass}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || '—')}</strong></div>`;
 }
 function setControlCompactMode(compact) {
-  $('#taskDetailPanel')?.classList.toggle('hidden', compact);
+  $('#taskDetailPanel')?.classList.toggle('runtime-detail', compact);
 }
 function renderTaskDetails(task) {
   const panel = $('#taskDetailPanel');
@@ -456,6 +471,9 @@ function renderTaskDetails(task) {
     detailItem('LeRobot 目录', lerobotDir, 'wide path'),
     detailItem('归一化目录', normStatsDir, 'wide path'),
     detailItem('数据格式', 'robot'),
+    detailItem('真实动作维度', status.action_dim),
+    detailItem('电机动作索引', (status.motor_action_indices || []).join(', ') || '无'),
+    detailItem('状态尾部初值', (status.state_defaults || []).slice(14).join(', ') || '无'),
     detailItem('相机映射', status.camera_map || 'auto', 'wide path'),
     detailItem('image-size', status.image_size || 'original'),
     detailItem('原始图像尺寸', imageShapeText(status.source_image_shape)),
@@ -832,6 +850,9 @@ function taskByName(taskName) {
 }
 function manualDerivedValues(taskName, values = {}) {
   const task = taskName || DEFAULT_TRAINING_TASK_NAME;
+  const taskRecord = taskByName(task);
+  const postprocess = taskRecord?.postprocess_status || {};
+  const stateDefaults = Array.isArray(postprocess.state_defaults) ? postprocess.state_defaults : [];
   const numTrainSteps = values.numTrainSteps || TRAINING_COMMAND_DEFAULTS.numTrainSteps;
   const expName = `pi05_${task}_${numTrainSteps}`;
   const packageTimestamp = values.packageTimestamp || currentTimestampText();
@@ -842,6 +863,11 @@ function manualDerivedValues(taskName, values = {}) {
     repoId: `local/${task}`,
     expName,
     modelFile: `${expName}_${packageTimestamp}.tar.gz`,
+    realActionDim: postprocess.action_dim || TRAINING_COMMAND_DEFAULTS.realActionDim,
+    stateTailValues: stateDefaults.slice(14).join(','),
+    motorActionIndices: Array.isArray(postprocess.motor_action_indices)
+      ? postprocess.motor_action_indices.join(',')
+      : '',
   };
 }
 function manualTaskOptions(selectedTaskName = '') {
@@ -922,7 +948,7 @@ function buildManualValues(input) {
     CONFIG_NAME: input.configName || TRAINING_COMMAND_DEFAULTS.configName,
     EXP_NAME: exp,
     ACTION_DIM: input.actionDim || TRAINING_COMMAND_DEFAULTS.actionDim,
-    REAL_ACTION_DIM: input.realActionDim || TRAINING_COMMAND_DEFAULTS.realActionDim,
+    REAL_ACTION_DIM: input.realActionDim || derived.realActionDim || TRAINING_COMMAND_DEFAULTS.realActionDim,
     ACTION_HORIZON: input.actionHorizon || TRAINING_COMMAND_DEFAULTS.actionHorizon,
     FSDP_DEVICES: input.fsdpDevices || TRAINING_COMMAND_DEFAULTS.fsdpDevices,
     BATCH_SIZE: input.batchSize || TRAINING_COMMAND_DEFAULTS.batchSize,
@@ -931,6 +957,9 @@ function buildManualValues(input) {
     PACKAGE_TIMESTAMP: packageTimestamp,
     SAVE_INTERVAL: input.saveInterval || TRAINING_COMMAND_DEFAULTS.saveInterval,
     KEEP_PERIOD: input.keepPeriod || TRAINING_COMMAND_DEFAULTS.keepPeriod,
+    STATE_TAIL_VALUES: input.stateTailValues ?? derived.stateTailValues,
+    MOTOR_ACTION_INDICES: input.motorActionIndices ?? derived.motorActionIndices,
+    MOTOR_CONTROL_URL: input.motorControlUrl || 'http://127.0.0.1:18099/api/motor/control',
     TARGET_HOST: input.targetHost || 'robot@192.168.61.228',
     TARGET_MODEL_DIR: input.targetModelDir || '/data03/data/models/openpi_downloads',
   };
@@ -970,7 +999,7 @@ function renderDeliveryTemplateEditors(templates) {
   return `<details class="manual-template-panel" open>
     <summary>命令模板</summary>
     <div class="template-toolbar">
-      <div class="template-help">模板保存在 ${escapeHtml(appState.delivery?.path || 'config/delivery_templates.json')}；可使用 {{TASK_NAME}}、{{INSTRUCTION}}、{{DATA_PACKAGE}}、{{MODEL_FILE}}、{{REPO_ID}}、{{NUM_TRAIN_STEPS}}、{{MODEL_TRAIN_DIR}}、{{PACKAGE_TIMESTAMP}} 等变量。</div>
+      <div class="template-help">模板保存在 ${escapeHtml(appState.delivery?.path || 'config/delivery_templates.json')}；可使用 {{TASK_NAME}}、{{INSTRUCTION}}、{{DATA_PACKAGE}}、{{MODEL_FILE}}、{{REPO_ID}}、{{NUM_TRAIN_STEPS}}、{{MODEL_TRAIN_DIR}}、{{PACKAGE_TIMESTAMP}}、{{STATE_TAIL_VALUES}}、{{MOTOR_ACTION_INDICES}} 等变量。</div>
       <button class="action template-add" type="button" data-action="delivery-add-template">＋ 新增标题</button>
     </div>
     <div class="template-editor-list">${rows || '<div class="data-preview-empty compact">暂无模板</div>'}</div>
@@ -1025,6 +1054,9 @@ function currentManualValues() {
     configName: $('#manualConfigName')?.value || TRAINING_COMMAND_DEFAULTS.configName,
     actionDim: $('#manualActionDim')?.value || TRAINING_COMMAND_DEFAULTS.actionDim,
     realActionDim: $('#manualRealActionDim')?.value || TRAINING_COMMAND_DEFAULTS.realActionDim,
+    stateTailValues: $('#manualStateTailValues')?.value || '',
+    motorActionIndices: $('#manualMotorActionIndices')?.value || '',
+    motorControlUrl: $('#manualMotorControlUrl')?.value || 'http://127.0.0.1:18099/api/motor/control',
     actionHorizon: $('#manualActionHorizon')?.value || TRAINING_COMMAND_DEFAULTS.actionHorizon,
     expName: $('#manualExpName')?.value || derived.expName,
     numTrainSteps: $('#manualNumTrainSteps')?.value || TRAINING_COMMAND_DEFAULTS.numTrainSteps,
@@ -1053,6 +1085,12 @@ function syncManualDerivedFieldsFromTask() {
   if (expInput) expInput.value = derived.expName;
   if (modelInput) modelInput.value = derived.modelFile;
   if (instructionInput) instructionInput.value = taskByName(taskInput.value)?.instruction || '';
+  const realActionDimInput = $('#manualRealActionDim');
+  const stateTailInput = $('#manualStateTailValues');
+  const motorIndicesInput = $('#manualMotorActionIndices');
+  if (realActionDimInput) realActionDimInput.value = derived.realActionDim;
+  if (stateTailInput) stateTailInput.value = derived.stateTailValues;
+  if (motorIndicesInput) motorIndicesInput.value = derived.motorActionIndices;
 }
 function syncManualExpNameFromSteps() {
   const taskInput = $('#manualTaskName');
@@ -1099,6 +1137,9 @@ function renderManualCommands(input) {
       <label><span>OpenPI config-name</span><input id="manualConfigName" value="${escapeHtml(values.CONFIG_NAME)}"></label>
       <label><span>ACTION_DIM</span><input id="manualActionDim" value="${escapeHtml(values.ACTION_DIM)}"></label>
       <label><span>REAL_ACTION_DIM</span><input id="manualRealActionDim" value="${escapeHtml(values.REAL_ACTION_DIM)}"></label>
+      <label><span>状态尾部初值</span><input id="manualStateTailValues" value="${escapeHtml(values.STATE_TAIL_VALUES)}" readonly></label>
+      <label><span>电机动作索引</span><input id="manualMotorActionIndices" value="${escapeHtml(values.MOTOR_ACTION_INDICES)}" readonly></label>
+      <label><span>电机控制地址</span><input id="manualMotorControlUrl" value="${escapeHtml(values.MOTOR_CONTROL_URL)}"></label>
       <label><span>ACTION_HORIZON</span><input id="manualActionHorizon" value="${escapeHtml(values.ACTION_HORIZON)}"></label>
       <label><span>exp-name</span><input id="manualExpName" value="${escapeHtml(values.EXP_NAME)}"></label>
       <label><span>num-train-steps</span><input id="manualNumTrainSteps" type="number" min="1" value="${escapeHtml(values.NUM_TRAIN_STEPS)}"></label>
@@ -1291,6 +1332,22 @@ function persistMotorDebugValues() {
   motorDebugState = currentMotorDebugValues();
   localStorage.setItem('teleop.motorDebugState', JSON.stringify(motorDebugState));
 }
+function scheduleMotorConfigSync() {
+  const payload = motorDebugPayload();
+  const serialized = JSON.stringify(payload);
+  if (serialized === lastSyncedMotorConfig) return;
+  clearTimeout(motorConfigSyncTimer);
+  motorConfigSyncTimer = setTimeout(async () => {
+    try {
+      const result = await api('/api/motor/config', {config: payload});
+      appState.motor_debug = result.motor_debug || appState.motor_debug || {};
+      lastSyncedMotorConfig = serialized;
+    } catch (error) {
+      appState.motor_debug = {...(appState.motor_debug || {}), last_error: error.message, updated_at: new Date().toISOString()};
+      renderMotorDebug();
+    }
+  }, 300);
+}
 function motorModeText(mode) {
   return ({mit:'MIT 混合控制', position:'位置速度模式', velocity:'速度模式', forcePosition:'力位混控模式'}[mode] || mode);
 }
@@ -1313,6 +1370,24 @@ function motorCommandSummary(values = currentMotorDebugValues(), model = selecte
 function renderMotorDebug() {
   const select = $('#motorModelSelect');
   if (!select) return;
+  const live = appState.motor_debug || {};
+  if (!motorDebugHydrated && live.config) {
+    motorDebugState = {
+      ...motorDebugState,
+      modelId: live.config.model_id || motorDebugState.modelId,
+      canDevice: live.config.can_device || motorDebugState.canDevice,
+      canId: live.config.can_id ?? motorDebugState.canId,
+      bitrate: live.config.bitrate || motorDebugState.bitrate,
+      mode: live.config.mode || motorDebugState.mode,
+      direction: live.config.direction || motorDebugState.direction,
+      turnSpeed: live.config.turn_speed ?? motorDebugState.turnSpeed,
+      durationSec: live.config.duration_s ?? motorDebugState.durationSec,
+      controlHz: live.config.control_hz ?? motorDebugState.controlHz,
+      torque: live.config.torque ?? motorDebugState.torque,
+      kd: live.config.kd ?? motorDebugState.kd,
+    };
+    localStorage.setItem('teleop.motorDebugState', JSON.stringify(motorDebugState));
+  }
   const selectedId = select.value || motorDebugState.modelId || MOTOR_DEBUG_MODELS[0].id;
   select.innerHTML = MOTOR_DEBUG_MODELS.map(model => `<option value="${escapeHtml(model.id)}" ${model.id === selectedId ? 'selected' : ''}>${escapeHtml(model.vendor)} · ${escapeHtml(model.name)}</option>`).join('');
   const model = selectedMotorModel();
@@ -1324,9 +1399,8 @@ function renderMotorDebug() {
       CanDevice:'canDevice', CanId:'canId', Bitrate:'bitrate', Direction:'direction',
       TorqueTarget:'torque', TurnSpeed:'turnSpeed', DurationSec:'durationSec', ControlHz:'controlHz', Kd:'kd',
     }[name];
-    input.value = values[key];
+    if (document.activeElement !== input) input.value = values[key];
   });
-  const live = appState.motor_debug || {};
   $('#motorDebugBadge').textContent = live.connected ? `已连接 ${live.channel || values.canDevice}` : `${model.name} · ${model.protocol}`;
   $('#motorDebugBadge').classList.toggle('connected', Boolean(live.connected));
   $('#motorSpecPanel').innerHTML = [
@@ -1399,6 +1473,7 @@ async function runMotorDebugCommand(command, button = null) {
     const path = command === 'connect' ? '/api/motor/connect' : '/api/motor/control';
     const result = await api(path, {action: command, config: motorDebugPayload()});
     appState.motor_debug = result.motor_debug || {};
+    lastSyncedMotorConfig = JSON.stringify(motorDebugPayload());
     motorDebugLogs = [{
       time: new Date().toISOString(),
       title: labels[command] || command,
@@ -1408,7 +1483,13 @@ async function runMotorDebugCommand(command, button = null) {
     showNotice(`${labels[command] || '电机命令'}已执行`, 'success');
     renderMotorDebug();
   } catch(error) {
-    appState.motor_debug = {...(appState.motor_debug || {}), last_error: error.message, updated_at: new Date().toISOString()};
+    appState.motor_debug = error.payload?.motor_debug || {...(appState.motor_debug || {}), connected: false, last_error: error.message, updated_at: new Date().toISOString()};
+    if (button && command !== 'stop') {
+      activeMotorHoldButton = null;
+      activeMotorHoldCommand = '';
+      motorHoldPointerId = null;
+      setMotorHoldButtonPressed(button, false);
+    }
     showNotice(error.message);
     renderMotorDebug();
   } finally {
@@ -1417,6 +1498,63 @@ async function runMotorDebugCommand(command, button = null) {
       button.textContent = originalText;
     }
   }
+}
+async function runMotorHoldCommand(command, button = null) {
+  const labels = {left:'按住左转', right:'按住右转', stop:'松开停止'};
+  try {
+    const result = await api('/api/motor/control', {action: command, config: motorDebugPayload()});
+    appState.motor_debug = result.motor_debug || {};
+    lastSyncedMotorConfig = JSON.stringify(motorDebugPayload());
+    if (command !== 'stop') {
+      motorDebugLogs = [{
+        time: new Date().toISOString(),
+        title: labels[command] || command,
+        summary: motorCommandSummary(currentMotorDebugValues(), selectedMotorModel()),
+      }, ...motorDebugLogs].slice(0, 20);
+      localStorage.setItem('teleop.motorDebugLogs', JSON.stringify(motorDebugLogs));
+    }
+    renderMotorDebug();
+  } catch(error) {
+    appState.motor_debug = error.payload?.motor_debug || {...(appState.motor_debug || {}), connected: false, last_error: error.message, updated_at: new Date().toISOString()};
+    showNotice(error.message);
+    renderMotorDebug();
+  } finally {
+    if (button && command === 'stop') setMotorHoldButtonPressed(button, false);
+  }
+}
+function setMotorHoldButtonPressed(button, pressed) {
+  if (!button) return;
+  button.classList.toggle('active', pressed);
+  const hint = button.querySelector('small');
+  if (hint) hint.textContent = pressed ? '正在转动' : '按住运行';
+}
+function startMotorHold(button, event = null) {
+  const command = button?.dataset.command;
+  if (!['left', 'right'].includes(command)) return;
+  if (activeMotorHoldButton && activeMotorHoldCommand !== command) {
+    stopMotorHold();
+  }
+  activeMotorHoldButton = button;
+  activeMotorHoldCommand = command;
+  motorHoldPointerId = event?.pointerId ?? null;
+  setMotorHoldButtonPressed(button, true);
+  try {
+    if (event && button.setPointerCapture) button.setPointerCapture(event.pointerId);
+  } catch (_) {}
+  runMotorHoldCommand(command, button);
+}
+function stopMotorHold(event = null) {
+  if (!activeMotorHoldButton) return;
+  const button = activeMotorHoldButton;
+  if (event && motorHoldPointerId !== null && event.pointerId !== motorHoldPointerId) return;
+  activeMotorHoldButton = null;
+  activeMotorHoldCommand = '';
+  motorHoldPointerId = null;
+  try {
+    if (event && button.releasePointerCapture) button.releasePointerCapture(event.pointerId);
+  } catch (_) {}
+  setMotorHoldButtonPressed(button, false);
+  runMotorHoldCommand('stop', button);
 }
 function recordMotorDebugCommand(command) {
   const values = currentMotorDebugValues();
@@ -1429,6 +1567,253 @@ function recordMotorDebugCommand(command) {
   localStorage.setItem('teleop.motorDebugLogs', JSON.stringify(motorDebugLogs));
   showNotice(`${labels[command] || '调试命令'}已记录，真实下发接口后续接入`, 'success');
   renderMotorDebug();
+}
+function handDevices() {
+  return appState.hand_debug?.devices || [];
+}
+function selectedHandDevice() {
+  const devices = handDevices();
+  const selected = $('#handDeviceSelect')?.value || handDebugState.deviceId || appState.hand_debug?.default_device;
+  return devices.find(device => device.id === selected) || devices[0] || null;
+}
+function selectedHandTransport(device = selectedHandDevice()) {
+  if (!device) return null;
+  const selected = $('#handTransportSelect')?.value || handDebugState.transportId;
+  return (device.transports || []).find(transport => transport.id === selected) || device.transports?.[0] || null;
+}
+function handSideLabel(side) {
+  return side === 'left' ? '左手' : '右手';
+}
+function handDefaultPositions(device = selectedHandDevice()) {
+  return (device?.joints || []).map(() => 0);
+}
+function handPositions(device = selectedHandDevice()) {
+  const count = device?.joints?.length || 0;
+  const stored = Array.isArray(handDebugState.positions) ? handDebugState.positions : [];
+  return Array.from({length: count}, (_, index) => {
+    const value = Number(stored[index] ?? 0);
+    return Number.isFinite(value) ? Math.max(0, Math.min(value, 1)) : 0;
+  });
+}
+function persistHandDebugState() {
+  const device = selectedHandDevice();
+  const transport = selectedHandTransport(device);
+  const positions = $$('#handJointPanel [data-hand-joint]').map(input => Number(input.value) / 100);
+  handDebugState = {
+    ...handDebugState,
+    deviceId: device?.id || handDebugState.deviceId,
+    transportId: transport?.id || handDebugState.transportId,
+    side: $('#handSideSelect')?.value || handDebugState.side || 'right',
+    durationMs: Number($('#handDurationMs')?.value || handDebugState.durationMs || 500),
+    live: Boolean($('#handLiveToggle')?.checked),
+    positions: positions.length ? positions : handPositions(device),
+    options: handConnectionOptions(),
+  };
+  localStorage.setItem('teleop.handDebugState', JSON.stringify(handDebugState));
+}
+function handConnectionOptions() {
+  const result = {};
+  $$('#handConnectionFields [data-hand-connection-field]').forEach(input => {
+    result[input.dataset.handConnectionField] = input.type === 'number' ? Number(input.value) : input.value.trim();
+  });
+  return result;
+}
+function deriveHandSides(options = handConnectionOptions(), transport = selectedHandTransport()) {
+  if (transport?.id === 'modbus') return [options.side || 'right'];
+  if (options.sides === 'both') return ['left', 'right'];
+  return [options.sides || 'right'];
+}
+function renderHandConnectionFields(device = selectedHandDevice(), transport = selectedHandTransport(device)) {
+  const container = $('#handConnectionFields');
+  if (!container || !transport) return;
+  const defaults = appState.hand_debug?.defaults?.[device?.id || '']?.[transport.id] || {};
+  const stored = handDebugState.options || {};
+  container.innerHTML = (transport.connection_fields || []).map(field => {
+    const value = stored[field.id] ?? defaults[field.id] ?? field.value ?? '';
+    if (field.type === 'select') {
+      return `<label><span>${escapeHtml(field.label)}</span><select data-hand-connection-field="${escapeHtml(field.id)}">${(field.options || []).map(option => `<option value="${escapeHtml(option.value)}" ${String(option.value) === String(value) ? 'selected' : ''}>${escapeHtml(option.label)}</option>`).join('')}</select></label>`;
+    }
+    const attrs = [
+      `type="${escapeHtml(field.type || 'text')}"`,
+      `data-hand-connection-field="${escapeHtml(field.id)}"`,
+      `value="${escapeHtml(value)}"`,
+      field.placeholder ? `placeholder="${escapeHtml(field.placeholder)}"` : '',
+      field.minimum !== undefined ? `min="${escapeHtml(field.minimum)}"` : '',
+      field.maximum !== undefined ? `max="${escapeHtml(field.maximum)}"` : '',
+    ].filter(Boolean).join(' ');
+    return `<label><span>${escapeHtml(field.label)}</span><input ${attrs}></label>`;
+  }).join('');
+}
+function updateHandModelPreview(device = selectedHandDevice(), positions = handPositions(device)) {
+  const stage = $('#handPreviewStage');
+  const state = $('#handPreviewState');
+  if (!stage || !state || !device) return;
+  const side = $('#handSideSelect')?.value || handDebugState.side || 'right';
+  $('#handPreviewSide').textContent = handSideLabel(side);
+  if (!window.HandModelPreview) {
+    state.textContent = '姿态预览组件加载失败';
+    state.classList.remove('hidden');
+    return;
+  }
+  if (!handModelPreview) handModelPreview = new window.HandModelPreview(stage, state);
+  handModelPreview.setPose(side, positions, device.preview);
+}
+function renderHandDebug() {
+  const deviceSelect = $('#handDeviceSelect');
+  if (!deviceSelect) return;
+  const devices = handDevices();
+  if (!devices.length) {
+    $('#handDebugBadge').textContent = '无可用型号';
+    $('#handSpecPanel').innerHTML = '<div><span>状态</span><strong>未加载灵巧手设备注册信息</strong></div>';
+    $('#handJointPanel').innerHTML = '';
+    return;
+  }
+  const live = appState.hand_debug?.status || {};
+  const selectedId = handDebugState.deviceId || appState.hand_debug?.default_device || devices[0].id;
+  deviceSelect.innerHTML = devices.map(device => `<option value="${escapeHtml(device.id)}" ${device.id === selectedId ? 'selected' : ''}>${escapeHtml(device.name)}</option>`).join('');
+  const device = selectedHandDevice();
+  const configured = appState.hand_debug?.defaults?.[device.id] || {};
+  const transportId = handDebugState.transportId || configured.default_transport || device.transports?.[0]?.id || '';
+  const transportSelect = $('#handTransportSelect');
+  transportSelect.innerHTML = (device.transports || []).map(transport => `<option value="${escapeHtml(transport.id)}" ${transport.id === transportId ? 'selected' : ''}>${escapeHtml(transport.name)}</option>`).join('');
+  renderHandConnectionFields(device, selectedHandTransport(device));
+  const options = handConnectionOptions();
+  const sides = live.connected ? Object.keys(live.hands || {}) : deriveHandSides(options);
+  const side = sides.includes(handDebugState.side) ? handDebugState.side : (sides[0] || 'right');
+  $('#handSideSelect').innerHTML = sides.map(item => `<option value="${escapeHtml(item)}" ${item === side ? 'selected' : ''}>${handSideLabel(item)}</option>`).join('');
+  $('#handDurationMs').value = handDebugState.durationMs || 500;
+  $('#handLiveToggle').checked = Boolean(handDebugState.live);
+  $('#handDebugBadge').textContent = live.connected ? `已连接 ${device.name} · ${selectedHandTransport(device)?.name || live.transport}` : `${device.name} · 未连接`;
+  $('#handDebugBadge').classList.toggle('connected', Boolean(live.connected));
+  $('#handSpecPanel').innerHTML = [
+    ['型号', `${device.manufacturer || ''} ${device.model || device.name}`.trim()],
+    ['通信方式', (device.transports || []).map(item => item.name).join(' / ')],
+    ['控制范围', `${device.position_convention?.open ?? 0} 张开 / ${device.position_convention?.closed ?? 1} 闭合`],
+    ['关节数量', `${device.joints?.length || 0}`],
+    ['当前连接', live.connected ? `${live.device_id || device.id} · ${live.transport || selectedHandTransport(device)?.id}` : '未连接'],
+    ['控制源', live.control_owner || '手动'],
+  ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
+  const positions = handPositions(device);
+  updateHandModelPreview(device, positions);
+  const handStatus = live.hands?.[side] || {};
+  const actual = Array.isArray(handStatus.positions) ? handStatus.positions : null;
+  $('#handJointPanel').innerHTML = (device.joints || []).map((joint, index) => {
+    const target = Math.round((positions[index] ?? 0) * 100);
+    const actualValue = actual ? Math.round((Number(actual[index]) || 0) * 100) : null;
+    return `<div class="hand-joint-row">
+      <div class="hand-joint-name"><strong>${escapeHtml(joint.name)}</strong><span>${escapeHtml(joint.english_name || joint.id || '')}</span></div>
+      <div class="hand-slider-stack">
+        <input type="range" min="0" max="100" step="1" value="${target}" style="--hand-target:${target}%" data-hand-joint="${index}">
+        <div class="hand-actual-track" aria-label="实际位置"><i style="left:${actualValue ?? 0}%" class="${actualValue == null ? 'hidden' : ''}"></i></div>
+      </div>
+      <label><span>目标</span><input type="number" min="0" max="100" step="1" value="${target}" data-hand-joint-value="${index}"></label>
+      <div class="hand-actual-value"><span>实际</span><strong>${actualValue == null ? '暂无' : `${actualValue}%`}</strong></div>
+    </div>`;
+  }).join('');
+  const summary = [
+    `device=${device.name}`,
+    `transport=${selectedHandTransport(device)?.id || '-'}`,
+    `side=${side}`,
+    `duration=${Number($('#handDurationMs').value || 500)}ms`,
+    `positions=[${handPositions(device).map(value => value.toFixed(2)).join(', ')}]`,
+  ].join(' ');
+  $('#handCommandText').textContent = summary;
+  const statusRows = [
+    live.error ? {time: appState.hand_debug?.updated_at, title: '后端错误', summary: live.error} : null,
+    live.connected ? {time: live.connected_at ? new Date(live.connected_at * 1000).toISOString() : appState.hand_debug?.updated_at, title: '连接状态', summary: `${live.device_id || device.id} ${live.transport || ''}`} : null,
+    handStatus.online != null ? {time: handStatus.last_state_at ? new Date(handStatus.last_state_at * 1000).toISOString() : appState.hand_debug?.updated_at, title: `${handSideLabel(side)}反馈`, summary: handStatus.online ? '在线' : '暂无在线反馈'} : null,
+  ].filter(Boolean);
+  const rows = [...statusRows, ...handDebugLogs].slice(0, 10);
+  $('#handLogPanel').innerHTML = rows.length
+    ? rows.map(item => `<div><span>${escapeHtml(formatTime(item.time))}</span><strong>${escapeHtml(item.title)}</strong><code>${escapeHtml(item.summary)}</code></div>`).join('')
+    : '<div class="data-preview-empty compact">暂无调试记录</div>';
+}
+function updateHandJoint(index, percent) {
+  const device = selectedHandDevice();
+  const positions = handPositions(device);
+  positions[index] = Math.max(0, Math.min(Number(percent) / 100, 1));
+  handDebugState.positions = positions;
+  localStorage.setItem('teleop.handDebugState', JSON.stringify(handDebugState));
+  const range = $(`#handJointPanel [data-hand-joint="${index}"]`);
+  const value = $(`#handJointPanel [data-hand-joint-value="${index}"]`);
+  if (range) {
+    range.value = String(Math.round(positions[index] * 100));
+    range.style.setProperty('--hand-target', `${Math.round(positions[index] * 100)}%`);
+  }
+  if (value) value.value = String(Math.round(positions[index] * 100));
+  $('#handCommandText').textContent = [
+    `device=${selectedHandDevice()?.name || '-'}`,
+    `transport=${selectedHandTransport()?.id || '-'}`,
+    `side=${$('#handSideSelect')?.value || 'right'}`,
+    `duration=${Number($('#handDurationMs')?.value || 500)}ms`,
+    `positions=[${positions.map(item => item.toFixed(2)).join(', ')}]`,
+  ].join(' ');
+  updateHandModelPreview(device, positions);
+  if ($('#handLiveToggle')?.checked) scheduleHandLiveCommand();
+}
+function updateHandDeviceSelection() {
+  handDebugState.deviceId = $('#handDeviceSelect')?.value || handDebugState.deviceId;
+  const device = selectedHandDevice();
+  handDebugState.transportId = appState.hand_debug?.defaults?.[device?.id || '']?.default_transport || device?.transports?.[0]?.id;
+  handDebugState.positions = handDefaultPositions(device);
+  localStorage.setItem('teleop.handDebugState', JSON.stringify(handDebugState));
+  renderHandDebug();
+}
+function updateHandTransportSelection() {
+  handDebugState.transportId = $('#handTransportSelect')?.value || handDebugState.transportId;
+  localStorage.setItem('teleop.handDebugState', JSON.stringify(handDebugState));
+  renderHandDebug();
+}
+async function runHandDebugCommand(command) {
+  persistHandDebugState();
+  const device = selectedHandDevice();
+  const transport = selectedHandTransport(device);
+  const labels = {connect:'连接灵巧手', disconnect:'断开连接', command:'执行姿态', stop:'停止'};
+  const payload = {
+    device_id: device?.id,
+    transport: transport?.id,
+    options: handConnectionOptions(),
+    side: $('#handSideSelect')?.value || 'right',
+    positions: handPositions(device),
+    duration_ms: Number($('#handDurationMs')?.value || 500),
+  };
+  try {
+    const path = {
+      connect: '/api/hand/connect',
+      disconnect: '/api/hand/disconnect',
+      command: '/api/hand/command',
+      stop: '/api/hand/stop',
+    }[command];
+    const result = await api(path, command === 'disconnect' || command === 'stop' ? {} : payload);
+    appState.hand_debug = result.hand_debug || appState.hand_debug || {};
+    handDebugLogs = [{
+      time: new Date().toISOString(),
+      title: labels[command] || command,
+      summary: appState.hand_debug?.result?.message || $('#handCommandText')?.textContent || '',
+    }, ...handDebugLogs].slice(0, 20);
+    localStorage.setItem('teleop.handDebugLogs', JSON.stringify(handDebugLogs));
+    showNotice(appState.hand_debug?.result?.message || `${labels[command]}已执行`, 'success');
+  } catch (error) {
+    appState.hand_debug = error.payload?.hand_debug || appState.hand_debug || {};
+    showNotice(error.message);
+  } finally {
+    renderHandDebug();
+  }
+}
+function scheduleHandLiveCommand() {
+  clearTimeout(handLiveTimer);
+  handLiveTimer = setTimeout(() => {
+    if ($('#handLiveToggle')?.checked) runHandDebugCommand('command');
+  }, 120);
+}
+async function refreshHandDebug() {
+  try {
+    await refresh(false);
+    renderHandDebug();
+    showNotice('灵巧手状态已刷新', 'success');
+  } catch (error) {
+    showNotice(error.message);
+  }
 }
 function renderDataPreview(preview, episodeName = '') {
   const episodes = preview?.episodes || [];
@@ -1797,6 +2182,8 @@ function renderActiveView() {
     renderTasks();
   } else if (activeView === 'motorDebug') {
     renderMotorDebug();
+  } else if (activeView === 'handDebug') {
+    renderHandDebug();
   } else if (activeView === 'dataList') {
     renderDataList();
   } else if (activeView === 'processing') {
@@ -1965,7 +2352,7 @@ document.addEventListener('pointerdown', event => {
 
 function fillDeviceForm(device) {
   const form = $('#deviceForm'); form.reset();
-  const values = device ? {name:device.name,...device.config,xr_view:device.config.xr_view || 'head',arm_reference_mode:device.config.arm_reference_mode || 'head_position',img_server_ip:device.config.img_server_ip || DEFAULT_IMAGE_SERVER_IP,webrtc_server_ip:device.config.webrtc_server_ip || DEFAULT_WEBRTC_SERVER_IP,data_dir:device.config.data_dir || appState.data_dir || DEFAULT_DATA_DIR,init_arm_pose_file:device.config.init_arm_pose_file || '',init_arm_pose_duration:device.config.init_arm_pose_duration || 5,ik_replay_live_url:device.config.ik_replay_live_url || DEFAULT_IK_REPLAY_LIVE_URL,ik_replay_live_fps:device.config.ik_replay_live_fps || 10} : {arm:'H2',left_ee:'none',right_ee:'inspire_dfx',input_mode:'hand',display_mode:'pass-through',xr_view:'head',arm_reference_mode:'head_position',img_server_ip:DEFAULT_IMAGE_SERVER_IP,webrtc_server_ip:DEFAULT_WEBRTC_SERVER_IP,data_dir:appState.data_dir || DEFAULT_DATA_DIR,network_interface:'enp86s0',frequency:30,init_arm_pose_file:DEFAULT_H2_INIT_ARM_POSE_FILE,init_arm_pose_duration:5,headless:true,motion:true,ik_replay_live_enable:false,ik_replay_live_url:DEFAULT_IK_REPLAY_LIVE_URL,ik_replay_live_fps:10};
+  const values = device ? {name:device.name,...device.config,xr_view:device.config.xr_view || 'head',arm_reference_mode:device.config.arm_reference_mode || 'head_position',img_server_ip:device.config.img_server_ip || DEFAULT_IMAGE_SERVER_IP,webrtc_server_ip:device.config.webrtc_server_ip || DEFAULT_WEBRTC_SERVER_IP,data_dir:device.config.data_dir || appState.data_dir || DEFAULT_DATA_DIR,init_arm_pose_file:device.config.init_arm_pose_file || '',init_arm_pose_duration:device.config.init_arm_pose_duration || 5,motor_button_control:Boolean(device.config.motor_button_control),ik_replay_live_url:device.config.ik_replay_live_url || DEFAULT_IK_REPLAY_LIVE_URL,ik_replay_live_fps:device.config.ik_replay_live_fps || 10} : {arm:'H2',left_ee:'none',right_ee:'inspire_dfx',input_mode:'hand',display_mode:'pass-through',xr_view:'head',arm_reference_mode:'head_position',img_server_ip:DEFAULT_IMAGE_SERVER_IP,webrtc_server_ip:DEFAULT_WEBRTC_SERVER_IP,data_dir:appState.data_dir || DEFAULT_DATA_DIR,network_interface:'enp86s0',frequency:30,init_arm_pose_file:DEFAULT_H2_INIT_ARM_POSE_FILE,init_arm_pose_duration:5,headless:true,motion:true,motor_button_control:false,ik_replay_live_enable:false,ik_replay_live_url:DEFAULT_IK_REPLAY_LIVE_URL,ik_replay_live_fps:10};
   if (values.ee && !values.left_ee && !values.right_ee) {
     values.left_ee = values.ee;
     values.right_ee = values.ee;
@@ -1975,7 +2362,7 @@ function fillDeviceForm(device) {
 }
 function syncEndEffector() {
   const form=$('#deviceForm');
-  const passive = new Set(['none', 'rubber']);
+  const passive = new Set(['none', 'rubber', 'motor']);
   const isActive = value => !passive.has(value);
   const selects = {
     left_ee: form.elements.left_ee,
@@ -1983,6 +2370,7 @@ function syncEndEffector() {
   };
   const isAllowedWithOther = (value, otherValue) => {
     if (value === otherValue) return true;
+    if (value === 'motor' || otherValue === 'motor') return !isActive(value) && !isActive(otherValue);
     if (!isActive(value) || !isActive(otherValue)) return true;
     return false;
   };
@@ -2004,6 +2392,13 @@ function syncEndEffector() {
   normalizeSelect('right_ee', 'left_ee');
   const leftEe = form.elements.left_ee.value;
   const rightEe = form.elements.right_ee.value;
+  const hasMotorEndEffector = leftEe === 'motor' || rightEe === 'motor';
+  if (hasMotorEndEffector) {
+    form.elements.input_mode.value = 'controller';
+    form.elements.display_mode.value = 'pass-through';
+    form.elements.xr_view.value = 'head';
+    deviceFormDirty = true;
+  }
   const hasActiveEndEffector = [leftEe, rightEe].some(isActive);
   if (hasActiveEndEffector && form.elements.input_mode.value === 'controller') {
     form.elements.input_mode.value = 'hand';
@@ -2017,7 +2412,9 @@ function syncEndEffector() {
     form.elements.arm_reference_mode.value = 'head_position';
   }
   const sameEndEffector = leftEe === rightEe;
-  $('#eeHint').textContent=hasActiveEndEffector
+  $('#eeHint').textContent=hasMotorEndEffector
+    ? '电机使用 PICO 手柄模式；trigger/squeeze 长按转动，松开停止'
+    : hasActiveEndEffector
     ? '主动末端需要 hand；左右主动末端必须一致，或一侧主动、一侧被动'
     : '不控制/橡胶手不会发送末端控制命令';
 }
@@ -2311,6 +2708,20 @@ $('#dataListPageJump')?.addEventListener('blur', event => jumpDataListPage(event
 document.addEventListener('change', event => {
   if (event.target?.closest('#motorDebugView')) {
     renderMotorDebug();
+    scheduleMotorConfigSync();
+    return;
+  }
+  if (event.target?.closest('#handDebugView')) {
+    if (event.target?.id === 'handDeviceSelect') {
+      updateHandDeviceSelection();
+    } else if (event.target?.id === 'handTransportSelect') {
+      updateHandTransportSelection();
+    } else if (event.target?.matches('[data-hand-joint-value]')) {
+      updateHandJoint(Number(event.target.dataset.handJointValue), Number(event.target.value));
+    } else {
+      persistHandDebugState();
+      renderHandDebug();
+    }
     return;
   }
   if (event.target?.id === 'ossTaskNameInput') {
@@ -2331,13 +2742,32 @@ document.addEventListener('change', event => {
 });
 document.addEventListener('input', event => {
   if (event.target?.closest('#motorDebugView')) {
-    renderMotorDebug();
+    // Number fields are temporarily empty while the user replaces a value.
+    // Keep that draft in the input until change/blur commits and validates it.
+    if (String(event.target.value ?? '').trim() !== '') persistMotorDebugValues();
+    return;
+  }
+  if (event.target?.closest('#handDebugView')) {
+    if (event.target?.matches('[data-hand-joint]')) {
+      updateHandJoint(Number(event.target.dataset.handJoint), Number(event.target.value));
+    } else {
+      persistHandDebugState();
+    }
     return;
   }
   if (event.target?.id === 'ossTaskNameInput') {
     ossTransferState.taskName = cleanTaskName(event.target.value);
   }
 });
+document.addEventListener('pointerdown', event => {
+  const button = event.target?.closest('[data-action="motor-hold"]');
+  if (!button) return;
+  event.preventDefault();
+  startMotorHold(button, event);
+});
+document.addEventListener('pointerup', event => stopMotorHold(event));
+document.addEventListener('pointercancel', event => stopMotorHold(event));
+window.addEventListener('blur', () => stopMotorHold());
 async function jumpEpisodeFramePage(input) {
   const framePage = dataPreviewState.preview?.frame_page || {};
   const nextPage = clampPage(input?.value, framePage.total_pages || 1);
@@ -2393,7 +2823,8 @@ $('#taskPageJump')?.addEventListener('blur', event => jumpTaskPage(event.current
 $('#deviceForm').addEventListener('submit', async event => {
   event.preventDefault(); const f=new FormData(event.currentTarget);
   const leftEe=f.get('left_ee'), rightEe=f.get('right_ee');
-  const device={name:f.get('name'),arm:f.get('arm'),ee:leftEe===rightEe?leftEe:'none',left_ee:leftEe,right_ee:rightEe,input_mode:f.get('input_mode'),display_mode:f.get('display_mode'),xr_view:f.get('xr_view') || 'head',arm_reference_mode:f.get('arm_reference_mode') || 'head_position',img_server_ip:f.get('img_server_ip') || DEFAULT_IMAGE_SERVER_IP,webrtc_server_ip:f.get('webrtc_server_ip') || DEFAULT_WEBRTC_SERVER_IP,data_dir:f.get('data_dir') || DEFAULT_DATA_DIR,network_interface:f.get('network_interface'),frequency:Number(f.get('frequency')),init_arm_pose_file:f.get('init_arm_pose_file') || '',init_arm_pose_duration:Number(f.get('init_arm_pose_duration') || 5),headless:f.has('headless'),motion:f.has('motion'),ik_replay_live_enable:f.has('ik_replay_live_enable'),ik_replay_live_url:f.get('ik_replay_live_url') || DEFAULT_IK_REPLAY_LIVE_URL,ik_replay_live_fps:Number(f.get('ik_replay_live_fps') || 10)};
+  const hasMotorEndEffector = leftEe === 'motor' || rightEe === 'motor';
+  const device={name:f.get('name'),arm:f.get('arm'),ee:leftEe===rightEe?leftEe:'none',left_ee:leftEe,right_ee:rightEe,input_mode:f.get('input_mode'),display_mode:f.get('display_mode'),xr_view:f.get('xr_view') || 'head',arm_reference_mode:f.get('arm_reference_mode') || 'head_position',img_server_ip:f.get('img_server_ip') || DEFAULT_IMAGE_SERVER_IP,webrtc_server_ip:f.get('webrtc_server_ip') || DEFAULT_WEBRTC_SERVER_IP,data_dir:f.get('data_dir') || DEFAULT_DATA_DIR,network_interface:f.get('network_interface'),frequency:Number(f.get('frequency')),init_arm_pose_file:f.get('init_arm_pose_file') || '',init_arm_pose_duration:Number(f.get('init_arm_pose_duration') || 5),headless:f.has('headless'),motion:f.has('motion'),motor_button_control:hasMotorEndEffector,ik_replay_live_enable:f.has('ik_replay_live_enable'),ik_replay_live_url:f.get('ik_replay_live_url') || DEFAULT_IK_REPLAY_LIVE_URL,ik_replay_live_fps:Number(f.get('ik_replay_live_fps') || 10)};
   try { deviceFormDirty=false; applyState(await api('/api/device/save',{device})); showNotice('设备配置文件已更新','success'); } catch(error){deviceFormDirty=true;showNotice(error.message);}
 });
 $('#deviceForm').addEventListener('input',()=>deviceFormDirty=true);
@@ -2661,6 +3092,26 @@ document.addEventListener('click', async event => {
   }
   if(action==='motor-sim'){
     recordMotorDebugCommand(button.dataset.command || 'send');
+    return;
+  }
+  if(action==='hand-refresh'){
+    await refreshHandDebug();
+    return;
+  }
+  if(action==='hand-connect'){
+    await runHandDebugCommand('connect');
+    return;
+  }
+  if(action==='hand-disconnect'){
+    await runHandDebugCommand('disconnect');
+    return;
+  }
+  if(action==='hand-command'){
+    await runHandDebugCommand('command');
+    return;
+  }
+  if(action==='hand-stop'){
+    await runHandDebugCommand('stop');
     return;
   }
   if(action==='timestamp-now'){

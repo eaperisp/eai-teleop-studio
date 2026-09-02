@@ -301,9 +301,11 @@ python tools/generate_h2_camera_config.py \
   --torso-serial <torso_serial> \
   --left-serial <left_wrist_serial> \
   --right-serial <right_wrist_serial> \
-  --depth head \
-  --color-size 1920x1080 \
+  --depth head torso \
+  --color-size 640x480 \
   --head-color-size 1920x1080 \
+  --right-color-size 1920x1080 \
+  --depth-size 640x480 \
   --head-depth-size 1280x800 \
   -o /tmp/cam_config_server.yaml
 ```
@@ -314,20 +316,27 @@ python tools/generate_h2_camera_config.py \
   --torso-serial CPCBC530002E\
   --left-serial CP0F463000HS \
   --right-serial CP06563000E6 \
-  --depth head \
+  --depth head torso \
   --head-color-size 1920x1080 \
+  --torso-color-size 640x480 \
+  --left-color-size 640x480 \
+  --right-color-size 1920x1080 \
   --head-depth-size 1280x800 \
-  --color-size 1920x1080 \
+  --torso-depth-size 640x480 \
+  --color-size 640x480 \
+  --depth-size 640x480 \
   -o /tmp/cam_config_server.yaml
 ```
-`--depth head` 和 `--depth all` 生成的 RGB-D 流默认启用 ZMQ；`--depth none` 不生成深度配置。
+`--depth` 后可填写一个或多个位置；选中的 RGB-D 流默认启用 ZMQ，`--depth none` 不生成 RGB-D 配置。
 
 `--depth` 可选值：
 
 ```text
-不传或 head  生成 4 路 RGB + 头部 RGB-D 模板
-none         只生成 4 路 RGB
-all          生成 4 路 RGB + 头部/腰部/左腕/右腕 4 路 RGB-D 模板
+不传或 head       生成 4 路 RGB + 头部 RGB-D
+head torso        生成 4 路 RGB + 头部/腰部 RGB-D
+left right        生成 4 路 RGB + 左腕/右腕 RGB-D
+none              只生成 4 路 RGB
+all               生成 4 路 RGB + 头部/腰部/左腕/右腕 RGB-D
 ```
 
 如果现场只插了一部分相机，可以加 `--allow-missing` 生成草稿。确认无误后再覆盖正式配置：
@@ -341,7 +350,7 @@ cp /tmp/cam_config_server.yaml teleop/teleimager/cam_config_server.yaml
 
 ```text
 RGB ZMQ:      55555 head, 55556 torso, 55557 left_wrist, 55558 right_wrist
-Depth ZMQ:    55559 head_depth, 55560 left_wrist_depth, 55561 right_wrist_depth, 55562 torso_depth
+RGB-D ZMQ:    55560 head, 55564 left_wrist, 55565 right_wrist, 55566 torso
 WebRTC RGB:   60001 head, 60002 torso, 60003 left_wrist, 60004 right_wrist
 配置服务:     60000
 ```
@@ -496,15 +505,57 @@ sudo bash scripts/install_autostart_services.sh xr-teleop-web.service
 
 ## 开机自启服务
 
-项目提供 5 个 systemd 服务：
+项目提供 6 个 systemd 服务：
 
 ```text
+can0.service                          达妙电机 SocketCAN can0 初始化服务，1 Mbps
 xr-teleop-web.service                 Web 数据采集平台，端口 18099
 hand-web.service                      灵巧手调试工具，端口 18089
 teleimager-camera-capture.service     相机 WebRTC/ZMQ 服务
 robot-sync-tool.service               数据同步工具，默认端口 18090
 h2-switch-flip-api.service            H2 拨闸 API，端口 17002
 ```
+
+### CAN 电机服务
+
+`can0.service` 用于在 CAN USB 设备出现后配置 `can0`：先关闭接口，再设置 `1 Mbps` 波特率、`restart-ms 100` 和 `txqueuelen 1000`，最后拉起接口。不能只执行 `ip link set can0 up`；接口尚未配置波特率时会返回 `RTNETLINK answers: Invalid argument`。
+
+只安装 CAN 服务：
+
+```bash
+cd /home/robot/eai-teleop-studio
+sudo bash scripts/install_autostart_services.sh can0.service
+```
+
+手动安装方式：
+
+```bash
+cd /home/robot/eai-teleop-studio
+sudo install -m 0644 systemd/can0.service /etc/systemd/system/can0.service
+sudo systemctl daemon-reload
+sudo systemctl enable can0.service
+sudo systemctl restart can0.service
+```
+
+验证服务及接口参数：
+
+```bash
+systemctl is-enabled can0.service
+systemctl is-active can0.service
+ip -details link show can0
+```
+
+正常状态应包含 `enabled`、`active`、接口 `UP`、`bitrate 1000000`、`restart-ms 100` 和 `qlen 1000`。`can state ERROR-ACTIVE` 表示 CAN 控制器正在正常参与总线通信，不是服务错误。
+
+服务异常时执行：
+
+```bash
+sudo systemctl reset-failed can0.service
+sudo systemctl restart can0.service
+journalctl -u can0.service -n 50 --no-pager
+```
+
+服务通过 `BindsTo=sys-subsystem-net-devices-can0.device` 绑定 `can0` 设备，CAN USB 拔出时服务会停止，重新插入并再次识别为 `can0` 后会自动启动。如果设备被识别成 `can1`，需要将 `systemd/can0.service` 中的设备名统一改为实际名称，然后重新安装服务。
 
 安装全部服务：
 
@@ -533,6 +584,7 @@ sudo systemctl restart hand-web.service
 
 ```bash
 systemctl is-active xr-teleop-web.service
+systemctl is-active can0.service
 systemctl is-active hand-web.service
 systemctl is-active teleimager-camera-capture.service
 systemctl is-active robot-sync-tool.service
@@ -543,6 +595,7 @@ systemctl is-active h2-switch-flip-api.service
 
 ```bash
 sudo systemctl restart xr-teleop-web.service
+sudo systemctl restart can0.service
 sudo systemctl restart hand-web.service
 sudo systemctl restart teleimager-camera-capture.service
 sudo systemctl restart robot-sync-tool.service

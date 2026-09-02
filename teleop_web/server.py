@@ -33,7 +33,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Iterable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from teleop.robot_control.end_effectors import (
     PASSIVE_END_EFFECTORS,
@@ -43,6 +43,8 @@ from teleop.robot_control.end_effectors import (
 )
 from teleop.utils.daily_file_logger import DailyFileLogger
 from teleop_web.training_prep import TrainingPrepError, TrainingPrepManager, training_data_root
+from hand_web.core.models import ValidationError as HandValidationError
+from hand_web.core.service import HandControlService
 
 try:
     from PIL import Image
@@ -57,6 +59,11 @@ for import_root in (TELEOP_ROOT, TELEIMAGER_SRC_ROOT):
     if import_root.exists() and str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
+HAND_PREVIEW_SCRIPT = PROJECT_ROOT / "hand_web" / "static" / "hand-preview.js"
+HAND_MODEL_ROOTS = {
+    "/assets/brainco_hand/": PROJECT_ROOT / "assets" / "brainco_hand",
+    "/assets/inspire_hand/": PROJECT_ROOT / "assets" / "inspire_hand",
+}
 ENTRYPOINT = PROJECT_ROOT / "teleop" / "teleop_hand_and_arm.py"
 CONVERT_ENTRYPOINT = PROJECT_ROOT / "tools" / "convert_h2_to_lerobot.py"
 PACKAGE_ENTRYPOINT = PROJECT_ROOT / "tools" / "package_lerobot_dataset.py"
@@ -88,10 +95,12 @@ DEFAULT_OPENPI_CONFIG_NAME = os.environ.get("XR_TELEOP_OPENPI_CONFIG_NAME", "pi0
 DEFAULT_CONFIG_FILE = default_project_path("XR_TELEOP_WEB_CONFIG", "config", "web_console.json")
 DEFAULT_LOG_DIR = default_project_path("XR_TELEOP_WEB_LOG_DIR", "logs")
 DEFAULT_DELIVERY_TEMPLATES_FILE = PROJECT_ROOT / "config" / "delivery_templates.json"
+DEFAULT_HAND_WEB_CONFIG_FILE = PROJECT_ROOT / "hand_web" / "config.json"
+DEFAULT_MOTOR_CONFIG_FILE = default_project_path("XR_TELEOP_MOTOR_CONFIG", "config", "motor.json")
 
 
 DEFAULT_DELIVERY_TEMPLATES: dict[str, Any] = {
-    "version": 5,
+    "version": 6,
     "templates": [
         {
             "id": "proxy_pull_dataset",
@@ -348,6 +357,7 @@ DEFAULT_DEVICE = {
     "ik_replay_live_enable": False,
     "ik_replay_live_url": DEFAULT_IK_REPLAY_LIVE_URL,
     "ik_replay_live_fps": 10,
+    "motor_button_control": False,
 }
 
 
@@ -468,6 +478,12 @@ def validate_device(raw: Any) -> dict[str, Any]:
     device["init_arm_pose_duration"] = init_pose_duration
     device["headless"] = bool(device.get("headless", False))
     device["motion"] = bool(device.get("motion", False))
+    has_motor_end_effector = device_uses_motor(device)
+    device["motor_button_control"] = bool(device.get("motor_button_control", False) or has_motor_end_effector)
+    if has_motor_end_effector and device["input_mode"] != "controller":
+        raise ValidationError("电机末端执行器需要使用 PICO 手柄模式")
+    if has_motor_end_effector and any(value not in PASSIVE_END_EFFECTORS for value in (device["left_ee"], device["right_ee"])):
+        raise ValidationError("电机末端执行器不能与灵巧手末端同时启用")
     device["ik_replay_live_enable"] = bool(device.get("ik_replay_live_enable", False))
     ik_replay_live_url = str(device.get("ik_replay_live_url", "") or "").strip()
     if device["ik_replay_live_enable"]:
@@ -493,6 +509,10 @@ def validate_device(raw: Any) -> dict[str, Any]:
         supported = " / ".join(sorted(SINGLE_SIDE_ACTIVE_END_EFFECTORS))
         raise ValidationError(f"单侧主动控制目前仅支持 {supported}")
     return device
+
+
+def device_uses_motor(device: dict[str, Any]) -> bool:
+    return "motor" in {device.get("left_ee"), device.get("right_ee"), device.get("ee")}
 
 
 def validate_task(raw: Any) -> dict[str, str]:
@@ -571,7 +591,10 @@ def build_command(device: dict[str, Any], task: dict[str, str], dataset_root: Pa
         f"--task-goal={task['instruction']}",
         f"--task-desc={task['description']}",
     ]
-    if device["left_ee"] == "rubber" and device["right_ee"] == "rubber":
+    if device_uses_motor(device):
+        command.insert(3, f"--right-ee={device['right_ee']}")
+        command.insert(3, f"--left-ee={device['left_ee']}")
+    elif device["left_ee"] == "rubber" and device["right_ee"] == "rubber":
         command.insert(3, f"--right-ee={device['right_ee']}")
         command.insert(3, f"--left-ee={device['left_ee']}")
     elif device["left_ee"] != device["right_ee"]:
@@ -589,6 +612,9 @@ def build_command(device: dict[str, Any], task: dict[str, str], dataset_root: Pa
         command.append("--headless")
     if device["motion"]:
         command.append("--motion")
+    has_motor_end_effector = device_uses_motor(device)
+    if device.get("motor_button_control") or has_motor_end_effector:
+        command.append("--motor-button-control")
     if device.get("ik_replay_live_enable") and device.get("ik_replay_live_url"):
         command.append("--ik-replay-live-enable")
         command.append(f"--ik-replay-live-url={device['ik_replay_live_url']}")
@@ -1260,9 +1286,30 @@ class DamiaoMotorDebug:
     CLEAR_ERROR_FRAME = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFB])
     CAN_FRAME_FORMAT = "=IB3x8s"
     CAN_FRAME_SIZE = struct.calcsize(CAN_FRAME_FORMAT)
+    DEFAULT_CONFIG = {
+        "canDevice": "can0",
+        "canId": 1,
+        "bitrate": "1000000",
+        "modelId": "dm-j4340-2ec-v11",
+        "direction": "left",
+        "turnSpeed": 5,
+        "durationSec": 10,
+        "controlHz": 50,
+        "pmax": 12.5,
+        "vmax": 8.0,
+        "tmax": 40.0,
+        "position": 0,
+        "velocity": 0,
+        "torque": 0,
+        "kp": 0,
+        "kd": 3,
+    }
 
-    def __init__(self) -> None:
+    def __init__(self, config_file: Path | None = None) -> None:
         self._socket: socket.socket | None = None
+        self.config_file = config_file or DEFAULT_MOTOR_CONFIG_FILE
+        self.config = self._normalize_config(dict(self.DEFAULT_CONFIG))
+        self._saved_config: dict[str, Any] = {}
         self.channel = ""
         self.connected = False
         self.last_action = ""
@@ -1274,17 +1321,21 @@ class DamiaoMotorDebug:
         self._lock = threading.RLock()
         self._motion_stop = threading.Event()
         self._motion_thread: threading.Thread | None = None
+        self._load_config()
 
     def state(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "connected": self.connected,
                 "channel": self.channel,
+                "can_device_status": self._can_device_status(self.channel or self.config.get("can_device", "")),
                 "last_action": self.last_action,
                 "last_error": self.last_error,
                 "last_frame": self.last_frame,
                 "last_feedback": self.last_feedback,
                 "motion": dict(self.motion),
+                "config": dict(self.config),
+                "config_file": str(self.config_file),
                 "updated_at": self.updated_at,
                 "socketcan_available": hasattr(socket, "PF_CAN") and hasattr(socket, "CAN_RAW"),
             }
@@ -1303,8 +1354,10 @@ class DamiaoMotorDebug:
     def connect(self, config: Any) -> dict[str, Any]:
         parsed = self._validate_config(config)
         with self._lock:
+            self._set_config(parsed)
             if not hasattr(socket, "PF_CAN") or not hasattr(socket, "CAN_RAW"):
                 raise ValidationError("当前系统不支持 SocketCAN；请在 Linux 机器人/工控机上使用 can0/vcan0")
+            self._ensure_can_device_up(parsed["can_device"])
             if self._socket is not None and self.channel == parsed["can_device"]:
                 self.connected = True
                 self.last_action = "connect"
@@ -1313,7 +1366,7 @@ class DamiaoMotorDebug:
             self.close()
             try:
                 can_socket = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
-                can_socket.settimeout(0.08)
+                can_socket.settimeout(0.01)
                 can_socket.bind((parsed["can_device"],))
             except OSError as exc:
                 raise ValidationError(f"CAN 设备连接失败：{exc}") from exc
@@ -1325,13 +1378,23 @@ class DamiaoMotorDebug:
             self._touch()
             return self.state()
 
+    def configure(self, config: Any) -> dict[str, Any]:
+        parsed = self._validate_config(config)
+        with self._lock:
+            self._set_config(parsed)
+            self.last_action = "configure"
+            self.last_error = ""
+            self._touch()
+            return self.state()
+
     def control(self, action: Any, config: Any) -> dict[str, Any]:
         action_name = _nonempty_string(action, "电机动作", 32)
         parsed = self._validate_config(config)
         if action_name == "connect":
             return self.connect(parsed)
         with self._lock:
-            if self._socket is None or self.channel != parsed["can_device"]:
+            self._set_config(parsed)
+            if self._socket is None or self.channel != parsed["can_device"] or not self.connected:
                 self.connect(parsed)
             if action_name in {"left", "right"}:
                 self._start_motion(action_name, parsed)
@@ -1345,6 +1408,7 @@ class DamiaoMotorDebug:
             if action_name in {"disable", "clear", "recover"}:
                 self._stop_motion(send_stop=True, config=parsed)
             can_id, payload = self._frame_for_action(action_name, parsed)
+            self._ensure_can_device_up(parsed["can_device"])
             self._send_frame(can_id, payload)
             self.last_action = action_name
             self.last_error = ""
@@ -1353,8 +1417,14 @@ class DamiaoMotorDebug:
             return self.state()
 
     def _validate_config(self, raw: Any) -> dict[str, Any]:
+        if raw is None:
+            raw = {}
         if not isinstance(raw, dict):
             raise ValidationError("电机配置格式不正确")
+        raw = {**self.config, **raw}
+        return self._normalize_config(raw)
+
+    def _normalize_config(self, raw: dict[str, Any]) -> dict[str, Any]:
         can_device = _nonempty_string(raw.get("canDevice") or raw.get("can_device") or "can0", "CAN 设备", 32)
         if not re.fullmatch(r"[a-zA-Z0-9_.:-]+", can_device):
             raise ValidationError("CAN 设备名称包含不支持的字符")
@@ -1365,7 +1435,12 @@ class DamiaoMotorDebug:
         if not 0 <= can_id <= 0x7FF:
             raise ValidationError("电机 ID 必须在 0 到 2047 之间")
         try:
-            speed = abs(float(raw.get("turnSpeed") if raw.get("turnSpeed") is not None else raw.get("velocity", 0.5)))
+            speed_value = raw.get("turnSpeed")
+            if speed_value is None:
+                speed_value = raw.get("turn_speed")
+            if speed_value is None:
+                speed_value = raw.get("velocity", 0.5)
+            speed = abs(float(speed_value))
         except (TypeError, ValueError) as exc:
             raise ValidationError("转动速度必须是数字") from exc
         vmax = float(raw.get("vmax") or raw.get("defaultVmax") or 8.0)
@@ -1388,19 +1463,104 @@ class DamiaoMotorDebug:
             torque = float(raw.get("torque") if raw.get("torque") is not None else 0.0)
         except (TypeError, ValueError) as exc:
             raise ValidationError("高级调试参数必须是数字") from exc
+        tmax = float(raw.get("tmax") or raw.get("defaultTmax") or 40.0)
+        direction = str(raw.get("direction") or "left")
+        if direction not in {"left", "right"}:
+            direction = "left"
+        mode = str(raw.get("mode") or "mit")
+        if mode not in {"mit", "position", "velocity", "forcePosition"}:
+            mode = "mit"
         return {
+            "model_id": str(raw.get("modelId") or raw.get("model_id") or "dm-j4340-2ec-v11"),
             "can_device": can_device,
             "can_id": can_id,
+            "bitrate": str(raw.get("bitrate") or "1000000"),
+            "mode": mode,
+            "direction": direction,
             "turn_speed": speed,
             "duration_s": duration_s,
             "control_hz": control_hz,
             "pmax": float(raw.get("pmax") or raw.get("defaultPmax") or 12.5),
             "vmax": vmax,
-            "tmax": float(raw.get("tmax") or raw.get("defaultTmax") or 40.0),
+            "tmax": tmax,
             "kp": max(0.0, min(kp, 500.0)),
             "kd": max(0.0, min(kd, 5.0)),
-            "torque": max(-float(raw.get("tmax") or raw.get("defaultTmax") or 40.0), min(torque, float(raw.get("tmax") or raw.get("defaultTmax") or 40.0))),
+            "torque": max(-tmax, min(torque, tmax)),
         }
+
+    def _load_config(self) -> None:
+        try:
+            payload = json.loads(self.config_file.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValidationError("电机配置文件必须是 JSON 对象")
+            self.config = self._normalize_config(payload)
+            self._saved_config = dict(self.config)
+        except FileNotFoundError:
+            self._save_config(force=True)
+        except (OSError, json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
+            self.last_error = f"电机配置文件读取失败：{exc}"
+
+    def _set_config(self, config: dict[str, Any]) -> None:
+        self.config = dict(config)
+        self._save_config()
+
+    def _save_config(self, force: bool = False) -> None:
+        if not force and self.config == self._saved_config and self.config_file.exists():
+            return
+        payload = {
+            "version": 1,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            **self.config,
+        }
+        temp_file = self.config_file.with_name(f".{self.config_file.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.replace(temp_file, self.config_file)
+        except OSError as exc:
+            try:
+                temp_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ValidationError(f"电机配置保存失败：{exc}") from exc
+        self._saved_config = dict(self.config)
+
+    def _can_device_status(self, can_device: str) -> dict[str, Any]:
+        status: dict[str, Any] = {
+            "name": can_device,
+            "exists": False,
+            "is_up": False,
+            "operstate": "",
+            "flags": "",
+        }
+        if not can_device:
+            return status
+        sysfs = Path("/sys/class/net") / can_device
+        status["exists"] = sysfs.exists()
+        if not status["exists"]:
+            return status
+        try:
+            status["operstate"] = (sysfs / "operstate").read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+        try:
+            flags_text = (sysfs / "flags").read_text(encoding="utf-8").strip()
+            status["flags"] = flags_text
+            status["is_up"] = bool(int(flags_text, 16) & 0x1)
+        except (OSError, ValueError):
+            pass
+        return status
+
+    def _ensure_can_device_up(self, can_device: str) -> None:
+        status = self._can_device_status(can_device)
+        if status["exists"] and status["is_up"]:
+            return
+        self.connected = False
+        if not status["exists"]:
+            self.last_error = f"CAN 设备不存在：{can_device}"
+        else:
+            self.last_error = f"CAN 设备 {can_device} 未启动，请先执行 ip link set {can_device} up"
+        raise ValidationError(self.last_error)
 
     def _start_motion(self, action: str, config: dict[str, Any]) -> None:
         self._stop_motion(send_stop=True, config=config)
@@ -1450,7 +1610,8 @@ class DamiaoMotorDebug:
                     break
                 with self._lock:
                     self._send_frame(can_id, self._make_mit_data(config, signed_speed, kp=0.0))
-                    self._read_feedback(config)
+                    if int((time.monotonic() - started) / interval) % 10 == 0:
+                        self._read_feedback(config)
                     state_code = (self.last_feedback or {}).get("state_code")
                     if state_code not in (None, 0, 1):
                         stop_reason = f"motor_error_{state_code}"
@@ -1476,14 +1637,20 @@ class DamiaoMotorDebug:
 
     def _stop_motion(self, *, send_stop: bool, config: dict[str, Any] | None = None) -> None:
         thread = self._motion_thread
+        if send_stop and config is not None and self._socket is not None:
+            stop_frame = self._make_mit_data(config, 0.0, kp=0.0)
+            for _ in range(3):
+                self._send_frame(int(config["can_id"]), stop_frame)
+                time.sleep(0.005)
         if thread and thread.is_alive():
             self._motion_stop.set()
             if thread is not threading.current_thread():
-                thread.join(timeout=0.5)
-        self._motion_thread = None
-        self._motion_stop.clear()
-        if send_stop and config is not None and self._socket is not None:
-            self._send_frame(int(config["can_id"]), self._make_mit_data(config, 0.0, kp=0.0))
+                thread.join(timeout=0.12)
+        if thread and thread.is_alive():
+            self._motion_thread = thread
+        else:
+            self._motion_thread = None
+            self._motion_stop.clear()
         self.motion = {
             **self.motion,
             "running": False,
@@ -1540,6 +1707,8 @@ class DamiaoMotorDebug:
     def _send_frame(self, can_id: int, payload: bytes) -> None:
         if self._socket is None:
             raise ValidationError("CAN 设备尚未连接")
+        if self.channel:
+            self._ensure_can_device_up(self.channel)
         data = payload[:8].ljust(8, b"\x00")
         frame = struct.pack(self.CAN_FRAME_FORMAT, can_id, min(len(payload), 8), data)
         try:
@@ -1547,6 +1716,11 @@ class DamiaoMotorDebug:
         except OSError as exc:
             self.connected = False
             self.last_error = str(exc)
+            try:
+                self._socket.close()
+            except OSError:
+                pass
+            self._socket = None
             raise ValidationError(f"CAN 帧发送失败：{exc}") from exc
         self.last_frame = {
             "can_id": f"0x{can_id:X}",
@@ -1608,6 +1782,57 @@ class DamiaoMotorDebug:
         self.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
+class HandDebugService:
+    """Embedded manual dexterous-hand debug service without vision control."""
+
+    def __init__(self, config_file: Path, logger: DailyFileLogger) -> None:
+        self.service = HandControlService(config_file, logger=logger)
+        self.updated_at = ""
+
+    def state(self) -> dict[str, Any]:
+        devices = self.service.devices()
+        status = self.service.status()
+        return {
+            "devices": devices.get("devices", []),
+            "default_device": devices.get("default_device"),
+            "defaults": devices.get("defaults", {}),
+            "status": status,
+            "updated_at": self.updated_at,
+        }
+
+    def connect(self, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValidationError("灵巧手连接参数格式不正确")
+        result = self.service.connect(payload)
+        self._touch()
+        return {"result": result, **self.state()}
+
+    def disconnect(self) -> dict[str, Any]:
+        result = self.service.disconnect()
+        self._touch()
+        return {"result": result, **self.state()}
+
+    def command(self, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValidationError("灵巧手控制参数格式不正确")
+        command_payload = dict(payload)
+        command_payload["source"] = "manual"
+        result = self.service.command(command_payload)
+        self._touch()
+        return {"result": result, **self.state()}
+
+    def stop(self) -> dict[str, Any]:
+        result = self.service.stop(source="manual")
+        self._touch()
+        return {"result": result, **self.state()}
+
+    def close(self) -> None:
+        self.service.close()
+
+    def _touch(self) -> None:
+        self.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
 class TeleopManager:
     def __init__(
         self,
@@ -1648,6 +1873,8 @@ class TeleopManager:
         self.postprocess_processes: dict[str, subprocess.Popen[str]] = {}
         self.archive_jobs: dict[str, dict[str, Any]] = {}
         self.motor_debug = DamiaoMotorDebug()
+        self.motor_control_url = os.environ.get("XR_TELEOP_MOTOR_CONTROL_URL", "http://127.0.0.1:18099/api/motor/control")
+        self.hand_debug = HandDebugService(DEFAULT_HAND_WEB_CONFIG_FILE, self.logger)
         self._lock = threading.RLock()
         self._log_thread: threading.Thread | None = None
         self._camera_cache: dict[str, Any] | None = None
@@ -1764,6 +1991,20 @@ class TeleopManager:
             "ready": True,
             "total_episodes": int(payload.get("total_episodes") or 0),
             "total_frames": int(payload.get("total_frames") or 0),
+        }
+
+    def _lerobot_runtime_layout(self, repo_id: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(
+                (self._lerobot_dataset_dir(repo_id) / "metadata.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return {
+            "motor_action_indices": payload.get("motor_action_indices") or [],
+            "state_defaults": payload.get("state_defaults") or [],
+            "vector_layout": payload.get("vector_layout") or [],
+            "end_effector_types": payload.get("end_effector_types") or {},
         }
 
     def _lerobot_dataset_ready(self, repo_id: str, task_dir: Path | None = None) -> bool:
@@ -2017,6 +2258,31 @@ class TeleopManager:
                     changed = True
             payload["version"] = 5
             changed = True
+        if version < 6:
+            template_ids = {
+                str(item.get("id") or "")
+                for item in payload.get("templates") or []
+                if isinstance(item, dict)
+            }
+            if "run_policy_on_robot" not in template_ids:
+                payload.setdefault("templates", []).append({
+                    "id": "run_policy_on_robot",
+                    "section": "model_deploy",
+                    "title": "机器人端：上机执行",
+                    "description": "在机器人上执行；电机动作索引和停止态来自 LeRobot 转换元数据。",
+                    "body": """cd /home/robot/eai-teleop-studio
+
+/home/robot/miniconda3/envs/teleop/bin/python3 tools/h2_openpi_live_vla.py \\
+  --server http://192.168.61.228:8080 \\
+  --instruction '{{INSTRUCTION}}' \\
+  --state-tail-values '{{STATE_TAIL_VALUES}}' \\
+  --motor-action-indices '{{MOTOR_ACTION_INDICES}}' \\
+  --motor-control-url '{{MOTOR_CONTROL_URL}}' \\
+  --execute --confirm-execute
+""",
+                })
+            payload["version"] = 6
+            changed = True
         if changed:
             payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             try:
@@ -2056,7 +2322,7 @@ class TeleopManager:
                 "body": body + "\n",
             })
         payload = {
-            "version": 5,
+            "version": 6,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "templates": normalized,
         }
@@ -4705,6 +4971,25 @@ class TeleopManager:
             "progress": progress,
         }
 
+    def _prepare_motor_for_teleop(self, device: dict[str, Any], task: dict[str, str]) -> None:
+        if not device_uses_motor(device):
+            return
+        config = self.motor_debug.config
+        self.logger.write(
+            "info",
+            "preparing motor end-effector for teleop",
+            task_name=task["name"],
+            can_device=config.get("can_device"),
+            can_id=config.get("can_id"),
+        )
+        try:
+            self.motor_debug.connect(config)
+            self.motor_debug.control("enable", config)
+        except ValidationError:
+            raise
+        except Exception as exc:
+            raise ValidationError(f"电机连接或使能失败：{exc}") from exc
+
     def start_task(self, task_id: Any) -> dict[str, Any]:
         with self._lock:
             if self.process is not None and self.process.poll() is None:
@@ -4727,6 +5012,7 @@ class TeleopManager:
                 "instruction": record.get("instruction") or record["description"],
                 "description": record["description"],
             }
+            self._prepare_motor_for_teleop(device, task)
             if self.ipc is not None:
                 self.ipc.close()
                 self.ipc = None
@@ -4748,6 +5034,8 @@ class TeleopManager:
                 json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             self.command = build_command(device, task, self.dataset_root)
+            if device_uses_motor(device):
+                self.command.append(f"--motor-control-url={self.motor_control_url}")
             self.logs.clear()
             command_text = display_command(self.command)
             self.logger.write(
@@ -4918,8 +5206,11 @@ class TeleopManager:
         for name, cfg in cam_config.items():
             if not isinstance(cfg, dict):
                 continue
+            data_format = cfg.get("data_format", "jpeg")
+            if data_format != "jpeg":
+                continue
             record_colors = []
-            if cfg.get("enable_zmq") and cfg.get("data_format", "jpeg") == "jpeg":
+            if cfg.get("enable_zmq"):
                 if name == "head_camera" and cfg.get("binocular", False):
                     record_colors = [f"color_{color_idx}", f"color_{color_idx + 1}"]
                     color_idx += 2
@@ -4928,12 +5219,16 @@ class TeleopManager:
                     color_idx += 1
             item = {
                 "name": name,
+                "data_format": data_format,
                 "enable_zmq": bool(cfg.get("enable_zmq")),
                 "zmq_port": cfg.get("zmq_port"),
                 "enable_webrtc": bool(cfg.get("enable_webrtc")),
                 "webrtc_port": cfg.get("webrtc_port"),
                 "image_shape": cfg.get("image_shape"),
                 "binocular": bool(cfg.get("binocular", False)),
+                "serial_number": cfg.get("serial_number"),
+                "usb_interface": cfg.get("usb_interface"),
+                "video_index": cfg.get("video_index"),
                 "record_colors": record_colors,
             }
             if item["enable_webrtc"] and item["webrtc_port"]:
@@ -4984,6 +5279,7 @@ class TeleopManager:
                 lerobot_dir = self._lerobot_dataset_dir(repo_id)
                 lerobot_info = self._lerobot_dataset_info(repo_id)
                 lerobot_ready = bool(lerobot_info.get("ready") and count > 0 and int(lerobot_info.get("total_episodes") or 0) >= count)
+                runtime_layout = self._lerobot_runtime_layout(repo_id) if lerobot_ready else {}
                 stats_path = self._norm_stats_path(repo_id, config_name)
                 convert_running = any(
                     job.get("kind") == "convert"
@@ -5232,6 +5528,11 @@ class TeleopManager:
                     "lerobot_ready": lerobot_ready,
                     "lerobot_episodes": lerobot_info.get("total_episodes", 0),
                     "lerobot_frames": lerobot_info.get("total_frames", 0),
+                    "action_dim": self._lerobot_action_dim(repo_id) if lerobot_ready else None,
+                    "motor_action_indices": runtime_layout.get("motor_action_indices") or [],
+                    "state_defaults": runtime_layout.get("state_defaults") or [],
+                    "vector_layout": runtime_layout.get("vector_layout") or [],
+                    "end_effector_types": runtime_layout.get("end_effector_types") or {},
                     "lerobot_expected_episodes": count,
                     "convert_running": convert_running,
                     "convert_cancelled": convert_cancelled,
@@ -5467,6 +5768,7 @@ class TeleopManager:
                 },
                 "delivery": self.delivery_templates(),
                 "motor_debug": self.motor_debug.state(),
+                "hand_debug": self.hand_debug.state(),
                 "camera_preview": self.camera_preview() if running else {"cameras": [], "error": None},
             }
 
@@ -5474,6 +5776,7 @@ class TeleopManager:
         if self.ipc is not None:
             self.ipc.close()
         self.motor_debug.close()
+        self.hand_debug.close()
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -5516,6 +5819,35 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/":
                 path = "/index.html"
+            if path == "/hand-preview.js":
+                file_path = HAND_PREVIEW_SCRIPT
+            else:
+                file_path = None
+                for prefix, asset_root in HAND_MODEL_ROOTS.items():
+                    if not path.startswith(prefix):
+                        continue
+                    root = asset_root.resolve()
+                    candidate = (root / unquote(path[len(prefix) :])).resolve()
+                    if candidate.is_relative_to(root) and candidate.is_file():
+                        file_path = candidate
+                    break
+                if path.startswith(tuple(HAND_MODEL_ROOTS)) and file_path is None:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+            if file_path is not None:
+                try:
+                    body = file_path.read_bytes()
+                except OSError:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             filename = path.removeprefix("/")
             if filename not in {"index.html", "app.js", "styles.css", "device.css"}:
                 self.send_error(HTTPStatus.NOT_FOUND)
@@ -5626,8 +5958,18 @@ class AppHandler(BaseHTTPRequestHandler):
                 result = self.manager.reset_delivery_templates()
             elif path == "/api/motor/connect":
                 result = {"motor_debug": self.manager.motor_debug.connect(payload.get("config"))}
+            elif path == "/api/motor/config":
+                result = {"motor_debug": self.manager.motor_debug.configure(payload.get("config"))}
             elif path == "/api/motor/control":
                 result = {"motor_debug": self.manager.motor_debug.control(payload.get("action"), payload.get("config"))}
+            elif path == "/api/hand/connect":
+                result = {"hand_debug": self.manager.hand_debug.connect(payload)}
+            elif path == "/api/hand/disconnect":
+                result = {"hand_debug": self.manager.hand_debug.disconnect()}
+            elif path == "/api/hand/command":
+                result = {"hand_debug": self.manager.hand_debug.command(payload)}
+            elif path == "/api/hand/stop":
+                result = {"hand_debug": self.manager.hand_debug.stop()}
             elif path == "/api/start":
                 result = self.manager.start_task(payload.get("task_id"))
             elif path == "/api/control":
@@ -5647,7 +5989,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             self._json(result)
-        except (ValidationError, TrainingPrepError) as exc:
+        except (ValidationError, TrainingPrepError, HandValidationError, RuntimeError) as exc:
             error = str(exc)
             self.manager.logger.write(
                 "warning",
@@ -5656,7 +5998,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 client=self.client_address[0],
                 error=error,
             )
-            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            payload: dict[str, Any] = {"error": str(exc)}
+            if path.startswith("/api/motor/"):
+                payload["motor_debug"] = self.manager.motor_debug.state()
+            if path.startswith("/api/hand/"):
+                payload["hand_debug"] = self.manager.hand_debug.state()
+            self._json(payload, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
             error = str(exc)
             self.manager.logger.write(
@@ -5751,6 +6098,7 @@ def main() -> None:
         task_file = dataset_root / "tasks.json"
     log_dir = args.log_dir.expanduser().resolve()
     manager = TeleopManager(dataset_root, config_file, task_file, log_dir)
+    manager.motor_control_url = f"http://127.0.0.1:{args.port}/api/motor/control"
     AppHandler.manager = manager
     server = ThreadingHTTPServer((args.host, args.port), AppHandler)
     manager.logger.write(

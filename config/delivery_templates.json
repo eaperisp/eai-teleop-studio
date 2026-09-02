@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "updated_at": "2026-07-30T15:32:06+0800",
   "templates": [
     {
@@ -64,6 +64,13 @@
       "title": "推理服务器：模型部署",
       "description": "在推理服务器上部署VLA大模型",
       "body": "# 在这里编写命令模板\n# 可使用 {{TASK_NAME}}、{{INSTRUCTION}}、{{REPO_ID}}、{{DATA_PACKAGE}} 等变量\ncd /data02/app/openpi\n\nexport OPENPI_CKPT=\"/data03/models/openpi/checkpoints/{{CONFIG_NAME}}/${TASK_NAME}/{{NUM_TRAIN_STEPS}}\"\nexport DEFAULT_PROMPT=${DEFAULT_PROMPT:-{{INSTRUCTION}}}\nexport OPENPI_ROOT=/data02/app/openpi\nexport OPENPI_CONFIG=\"{{CONFIG_NAME}}\"\nexport OPENPI_REPO_ID=\"{{REPO_ID}}\"\nexport OPENPI_H2_REPO_ID=\"{{REPO_ID}}\"\nexport OPENPI_H2_ACTION_DIM=\"{{ACTION_DIM}}\"\nexport OPENPI_H2_REAL_ACTION_DIM=\"{{REAL_ACTION_DIM}}\"\nexport OPENPI_H2_ACTION_HORIZON=\"{{ACTION_HORIZON}}\"\n\ncd /data02/app/openpi && nohup ./scripts/deploy/run_pi05_h2_server.sh > logs/h2_openpi_server.log 2>&1 &\n"
+    },
+    {
+      "id": "run_policy_on_robot",
+      "section": "model_deploy",
+      "title": "机器人端：上机执行",
+      "description": "在机器人上执行；电机动作索引和停止态来自 LeRobot 转换元数据。",
+      "body": "cd /home/robot/eai-teleop-studio\n\n/home/robot/miniconda3/envs/teleop/bin/python3 tools/h2_openpi_live_vla.py \\\n  --server http://192.168.61.228:8080 \\\n  --instruction '{{INSTRUCTION}}' \\\n  --state-tail-values '{{STATE_TAIL_VALUES}}' \\\n  --motor-action-indices '{{MOTOR_ACTION_INDICES}}' \\\n  --motor-control-url '{{MOTOR_CONTROL_URL}}' \\\n  --execute --confirm-execute\n"
     }
   ]
 }

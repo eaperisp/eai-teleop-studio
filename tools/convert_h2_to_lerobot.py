@@ -80,7 +80,7 @@ CAMERA_PRESET_SOURCES = {
 
 DEFAULT_VECTOR_KEYS = ("left_arm", "right_arm", "left_ee", "right_ee")
 NO_CONTROL_END_EFFECTOR_TYPES = {"none", ""}
-FIXED_END_EFFECTOR_DIMS = {"rubber": 1}
+FIXED_END_EFFECTOR_DIMS = {"rubber": 1, "motor": 1}
 
 H2_ARM_JOINT_NAMES = {
     "left_arm": [
@@ -896,6 +896,46 @@ def episode_ee_types(episodes: list[tuple[Path, dict[str, Any]]]) -> tuple[set[s
     return left_types, right_types
 
 
+def validate_episode_ee_types(episodes: list[tuple[Path, dict[str, Any]]]) -> dict[str, list[str]]:
+    left_types: set[str] = set()
+    right_types: set[str] = set()
+    for _, payload in episodes:
+        for frame in payload.get("data", []):
+            states = frame.get("states") if isinstance(frame, dict) else {}
+            for key, target in (("left_ee", left_types), ("right_ee", right_types)):
+                item = states.get(key) if isinstance(states, dict) else None
+                target.add(_end_effector_type(item) or "none")
+    for side, types in (("left_ee", left_types), ("right_ee", right_types)):
+        if len(types) > 1:
+            raise ValueError(
+                f"Dataset mixes multiple {side} types: {', '.join(sorted(types))}. "
+                "Use separate tasks for different end-effectors."
+            )
+    return {
+        "left_ee": sorted(left_types) or ["none"],
+        "right_ee": sorted(right_types) or ["none"],
+    }
+
+
+def vector_layout_metadata(
+    vector_dims: list[tuple[str, int]],
+    end_effector_types: dict[str, list[str]],
+) -> tuple[list[dict[str, Any]], list[int], list[float]]:
+    layout: list[dict[str, Any]] = []
+    motor_action_indices: list[int] = []
+    state_defaults: list[float] = []
+    offset = 0
+    for key, dim in vector_dims:
+        layout.append({"key": key, "dim": dim, "offset": offset})
+        types = set(end_effector_types.get(key) or [])
+        default = 0.5 if types == {"motor"} else 0.0
+        state_defaults.extend([default] * dim)
+        if types == {"motor"}:
+            motor_action_indices.extend(range(offset, offset + dim))
+        offset += dim
+    return layout, motor_action_indices, state_defaults
+
+
 def infer_camera_preset(episodes: list[tuple[Path, dict[str, Any]]], available_keys: set[str]) -> str:
     left_types, right_types = episode_ee_types(episodes)
     if right_types and not left_types:
@@ -1008,6 +1048,10 @@ def write_metadata(
     camera_preset: str,
     vector_keys: list[str],
     vector_dims: list[tuple[str, int]],
+    vector_layout: list[dict[str, Any]],
+    end_effector_types: dict[str, list[str]],
+    motor_action_indices: list[int],
+    state_defaults: list[float],
     joint_limits: dict[str, dict[str, float]],
     image_encoding: str,
     image_encoding_counts: dict[str, int],
@@ -1052,6 +1096,10 @@ def write_metadata(
         "missing_image_policy": "Black image placeholders are written for target image keys whose source camera is absent.",
         "vector_keys": vector_keys,
         "vector_dims": [{"key": key, "dim": dim} for key, dim in vector_dims],
+        "vector_layout": vector_layout,
+        "end_effector_types": end_effector_types,
+        "motor_action_indices": motor_action_indices,
+        "state_defaults": state_defaults,
         "joint_names_for_known_dims": joint_names,
         "h2_joint_limits": joint_limits,
         "note": "Raw qpos values are stored. OpenPI normalization stats should be computed after conversion.",
@@ -1129,9 +1177,18 @@ def main() -> int:
     schema_episodes = episodes[initial_start_index:final_end_index]
 
     sample_episode_dir, sample_frame = first_valid_frame(schema_episodes)
+    try:
+        end_effector_types = validate_episode_ee_types(schema_episodes)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     vector_dims = infer_vector_dims(schema_episodes, vector_keys)
     state_dim = sum(dim for _, dim in vector_dims)
     action_dim = state_dim
+    vector_layout, motor_action_indices, state_defaults = vector_layout_metadata(
+        vector_dims,
+        end_effector_types,
+    )
     camera_plan, camera_preset = build_camera_plan(
         explicit_map=camera_map,
         preset=args.camera_preset,
@@ -1396,6 +1453,10 @@ def main() -> int:
             camera_preset=camera_preset,
             vector_keys=vector_keys,
             vector_dims=vector_dims,
+            vector_layout=vector_layout,
+            end_effector_types=end_effector_types,
+            motor_action_indices=motor_action_indices,
+            state_defaults=state_defaults,
             joint_limits=joint_limits,
             image_encoding=image_encoding,
             image_encoding_counts=image_encoding_counts,
@@ -1430,6 +1491,10 @@ def main() -> int:
         camera_preset=camera_preset,
         vector_keys=vector_keys,
         vector_dims=vector_dims,
+        vector_layout=vector_layout,
+        end_effector_types=end_effector_types,
+        motor_action_indices=motor_action_indices,
+        state_defaults=state_defaults,
         joint_limits=joint_limits,
         image_encoding=image_encoding,
         image_encoding_counts=image_encoding_counts,
