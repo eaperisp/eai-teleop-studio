@@ -1,0 +1,16 @@
+[Unit]
+Description=Configure SocketCAN can0 for the Damiao motor
+BindsTo=sys-subsystem-net-devices-can0.device
+After=sys-subsystem-net-devices-can0.device
+
+[Service]
+Type=oneshot
+ExecStart=-/usr/sbin/ip link set can0 down
+ExecStart=/usr/sbin/ip link set can0 type can bitrate 1000000 restart-ms 100
+ExecStart=/usr/sbin/ip link set can0 txqueuelen 1000
+ExecStart=/usr/sbin/ip link set can0 up
+ExecStop=-/usr/sbin/ip link set can0 down
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sys-subsystem-net-devices-can0.device

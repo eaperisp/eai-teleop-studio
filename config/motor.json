@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "updated_at": "",
+  "model_id": "dm-j4340-2ec-v11",
+  "can_device": "can0",
+  "can_id": 1,
+  "bitrate": "1000000",
+  "mode": "mit",
+  "direction": "left",
+  "turn_speed": 5.0,
+  "duration_s": 10.0,
+  "control_hz": 50.0,
+  "pmax": 12.5,
+  "vmax": 8.0,
+  "tmax": 40.0,
+  "kp": 0.0,
+  "kd": 3.0,
+  "torque": 0.0
+}
