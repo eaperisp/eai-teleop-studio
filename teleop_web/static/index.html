@@ -4,23 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>遥操数采平台</title>
-  <link rel="stylesheet" href="/styles.css?v=20260728-command-full-height">
+  <link rel="stylesheet" href="/styles.css?v=20260903-debug-layout-3">
   <link rel="stylesheet" href="/device.css?v=20260713-device-clean">
 </head>
 <body>
   <aside class="sidebar">
     <div class="logo"><span class="robot-icon">XR</span><strong>数据采集平台</strong></div>
     <nav>
-      <button class="nav-item active" data-view="devices"><span>⚙</span>设备管理</button>
+      <button class="nav-item active" data-view="devices" title="设备管理"><span>⚙</span>设备管理</button>
       <div class="nav-group"><span>⌁</span>设备调试</div>
-      <button class="nav-item sub" data-view="motorDebug"><span>◉</span>电机调试助手</button>
-      <button class="nav-item sub" data-view="handDebug"><span>◇</span>灵巧手调试助手</button>
+      <button class="nav-item sub" data-view="motorDebug" title="电机调试助手"><span>◉</span>电机调试助手</button>
+      <button class="nav-item sub" data-view="handDebug" title="灵巧手调试助手"><span>◇</span>灵巧手调试助手</button>
       <div class="nav-group"><span>▦</span>数据管理</div>
-      <button class="nav-item sub" data-view="tasks"><span>●</span>数据采集</button>
-      <button class="nav-item sub" data-view="dataList"><span>▤</span>数据列表</button>
-      <button class="nav-item sub" data-view="processing"><span>▣</span>数据处理</button>
-      <button class="nav-item sub" data-view="training"><span>▣</span>训练数据集</button>
-      <button class="nav-item sub" data-view="oss"><span>⇄</span>OSS 传输</button>
+      <button class="nav-item sub" data-view="tasks" title="数据采集"><span>●</span>数据采集</button>
+      <button class="nav-item sub" data-view="dataList" title="数据列表"><span>▤</span>数据列表</button>
+      <button class="nav-item sub" data-view="processing" title="数据处理"><span>▣</span>数据处理</button>
+      <button class="nav-item sub" data-view="training" title="训练数据集"><span>▣</span>训练数据集</button>
+      <button class="nav-item sub" data-view="oss" title="OSS 传输"><span>⇄</span>OSS 传输</button>
     </nav>
   </aside>
   <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-label="收起菜单" title="收起菜单"><span></span></button>
@@ -120,18 +120,20 @@
           </div>
           <div id="motorSafetyPanel" class="motor-safety-panel"></div>
         </section>
-        <section class="training-panel">
-          <div class="training-panel-head"><div><h2>型号参数</h2><p>参数来自当前型号资料，新增型号时补充同结构字段</p></div></div>
-          <div id="motorSpecPanel" class="motor-spec-panel"></div>
-        </section>
+        <aside class="motor-debug-sidebar">
+          <section class="training-panel">
+            <div class="training-panel-head"><div><h2>型号参数</h2><p>参数来自当前型号资料，新增型号时补充同结构字段</p></div></div>
+            <div id="motorSpecPanel" class="motor-spec-panel"></div>
+          </section>
+          <section class="training-panel">
+            <div class="training-panel-head"><div><h2>建议流程</h2><p>首次接入按步骤推进，异常时先断电检查接线与 ID</p></div></div>
+            <div id="motorGuidePanel" class="motor-guide-panel"></div>
+          </section>
+        </aside>
         <section class="training-panel motor-debug-wide">
           <div class="training-panel-head"><div><h2>调试摘要</h2><p>显示本次页面将下发的 CAN 控制参数</p></div></div>
           <div class="command motor-command"><span>当前控制摘要</span><code id="motorCommandText">—</code><button class="copy-icon-btn" title="复制" aria-label="复制" data-action="copy-target" data-target="motorCommandText"><span></span></button></div>
           <div id="motorLogPanel" class="motor-log-panel"></div>
-        </section>
-        <section class="training-panel motor-debug-wide">
-          <div class="training-panel-head"><div><h2>建议流程</h2><p>第一次接入新电机时按步骤推进，异常时先断电检查接线与 ID</p></div></div>
-          <div id="motorGuidePanel" class="motor-guide-panel"></div>
         </section>
       </div>
     </section>
@@ -139,48 +141,90 @@
     <section id="handDebugView" class="view">
       <div class="page-title">
         <div><h1>灵巧手调试助手</h1><p>连接灵巧手，手动调试关节位置、执行姿态和停止动作</p></div>
-        <button id="handRefreshButton" class="primary" type="button" data-action="hand-refresh">刷新状态</button>
       </div>
-      <div class="hand-debug-layout">
-        <section class="training-panel hand-debug-main">
-          <div class="training-panel-head">
-            <div><h2>调试配置</h2><p>仅集成手动调试能力，不包含视觉控制</p></div>
-            <span id="handDebugBadge" class="motor-debug-badge">未连接</span>
-          </div>
-          <div class="hand-debug-form">
-            <div class="motor-field-group hand-connection-group">
-              <div class="motor-field-group-head"><strong>连接参数</strong><span class="motor-inline-actions"><button class="action blue" type="button" data-action="hand-connect">连接灵巧手</button><button class="action red" type="button" data-action="hand-disconnect">断开连接</button></span></div>
+      <div class="hand-console-layout">
+        <aside class="hand-console-sidebar">
+          <section class="training-panel hand-connection-panel">
+            <div class="training-panel-head">
+              <div><span class="hand-section-index">01</span><h2>设备连接</h2></div>
+              <span id="handDebugBadge" class="motor-debug-badge">未连接</span>
+            </div>
+            <div class="hand-connection-form">
               <label><span>灵巧手型号</span><select id="handDeviceSelect"></select></label>
               <label><span>通信方式</span><select id="handTransportSelect"></select></label>
               <div id="handConnectionFields" class="hand-connection-fields"></div>
+              <div class="hand-connection-actions">
+                <button class="action blue" type="button" data-action="hand-connect">连接灵巧手</button>
+                <button class="action red" type="button" data-action="hand-disconnect">断开连接</button>
+              </div>
+              <div id="handConnectionFacts" class="hand-connection-facts"></div>
             </div>
-            <div class="motor-field-group hand-command-group">
-              <div class="motor-field-group-head"><strong>姿态控制</strong><span class="motor-inline-actions"><button class="action blue" type="button" data-action="hand-command">执行姿态</button><button class="action red" type="button" data-action="hand-stop">停止</button></span></div>
-              <label><span>控制对象</span><select id="handSideSelect"><option value="right">右手</option><option value="left">左手</option></select></label>
-              <label><span>动作时长 ms</span><input id="handDurationMs" type="number" min="50" max="2000" step="50" value="500"></label>
-              <label class="hand-live-toggle"><span>实时发送</span><input id="handLiveToggle" type="checkbox"></label>
-            </div>
-            <div id="handJointPanel" class="hand-joint-panel"></div>
-          </div>
-        </section>
-        <aside class="hand-debug-sidebar">
-          <section class="training-panel">
-            <div class="training-panel-head"><div><h2>型号参数</h2><p>来自原灵巧手调试工具的设备注册信息</p></div></div>
-            <div id="handSpecPanel" class="motor-spec-panel"></div>
           </section>
-          <section class="training-panel hand-preview-panel">
-            <div class="training-panel-head"><div><h2>姿态预览</h2><p>随目标关节位置实时更新</p></div><span id="handPreviewSide" class="hand-preview-side">右手</span></div>
-            <div id="handPreviewStage" class="hand-preview-stage" aria-label="当前手指位置三维预览">
-              <div id="handPreviewState" class="hand-preview-state">模型加载中</div>
+          <section class="training-panel hand-activity-panel">
+            <div class="training-panel-head">
+              <div><span class="hand-section-index">05</span><h2>操作记录</h2></div>
+              <button class="hand-text-button" type="button" data-action="hand-clear-log">清空</button>
             </div>
+            <div id="handLogPanel" class="hand-activity-list"></div>
           </section>
         </aside>
-        <section class="training-panel hand-debug-wide">
-          <div class="training-panel-head"><div><h2>调试摘要</h2><p>显示当前连接、目标关节和最近一次反馈</p></div></div>
-          <div class="command motor-command"><span>当前控制摘要</span><code id="handCommandText">—</code><button class="copy-icon-btn" title="复制" aria-label="复制" data-action="copy-target" data-target="handCommandText"><span></span></button></div>
-          <div id="handLogPanel" class="motor-log-panel"></div>
+
+        <section class="hand-console-main">
+          <div class="hand-control-toolbar">
+            <div><strong>手动姿态控制</strong><span>0 张开 / 100 闭合</span></div>
+            <div class="hand-toolbar-controls">
+              <label><span>控制对象</span><select id="handSideSelect"><option value="right">右手</option><option value="left">左手</option></select></label>
+              <label class="hand-live-switch"><input id="handLiveToggle" type="checkbox"><i></i><span>实时发送</span></label>
+            </div>
+          </div>
+
+          <div class="hand-control-grid">
+            <section class="training-panel hand-joint-card">
+              <div class="training-panel-head">
+                <div><span class="hand-section-index">02</span><h2>关节位置</h2></div>
+                <button id="handRefreshButton" class="action blue" type="button" data-action="hand-refresh">读取当前姿态</button>
+              </div>
+              <div id="handJointPanel" class="hand-joint-panel"></div>
+              <div class="hand-command-bar">
+                <label><span>动作时长</span><input id="handDurationMs" type="number" min="50" max="2000" step="50" value="500"><i>ms</i></label>
+                <button class="action red" type="button" data-action="hand-stop">停止</button>
+                <button class="primary" type="button" data-action="hand-command">执行姿态</button>
+              </div>
+              <div class="command hand-control-summary"><span>当前控制摘要</span><code id="handCommandText">—</code><button class="copy-icon-btn" title="复制" aria-label="复制" data-action="copy-target" data-target="handCommandText"><span></span></button></div>
+            </section>
+
+            <aside class="hand-preview-column">
+              <section class="training-panel">
+                <div class="training-panel-head"><div><span class="hand-section-index">03</span><h2>型号参数</h2></div></div>
+                <div id="handSpecPanel" class="motor-spec-panel"></div>
+              </section>
+              <section class="training-panel hand-preview-panel">
+                <div class="training-panel-head"><div><span class="hand-section-index">04</span><h2>姿态预览</h2></div><span id="handPreviewSide" class="hand-preview-side">右手</span></div>
+                <div id="handPreviewStage" class="hand-preview-stage" aria-label="当前手指位置三维预览">
+                  <div id="handPreviewState" class="hand-preview-state">模型加载中</div>
+                </div>
+                <div class="hand-pose-library">
+                  <div class="hand-pose-heading"><div><strong>姿态库</strong><span id="handPoseHint">载入后由“执行姿态”确认发送</span></div><button class="action blue" type="button" data-action="hand-pose-add">新增姿态</button></div>
+                  <div id="handPoseList" class="hand-pose-list"></div>
+                </div>
+              </section>
+            </aside>
+          </div>
         </section>
       </div>
+
+      <dialog id="handPoseDialog" class="hand-pose-dialog">
+        <form id="handPoseForm" method="dialog">
+          <div class="hand-pose-dialog-head"><div><span class="hand-section-index">POSE</span><h2 id="handPoseDialogTitle">新增姿态</h2></div><button type="button" class="close" data-action="hand-pose-close" aria-label="关闭">×</button></div>
+          <div class="hand-pose-name-fields">
+            <label><span>英文名称</span><input id="handPoseNameEn" type="text" maxlength="64" required></label>
+            <label><span>中文描述</span><input id="handPoseDescriptionZh" type="text" maxlength="64" required></label>
+          </div>
+          <div class="hand-pose-joint-head"><strong>姿态关节</strong><span>0 张开 / 100 闭合</span></div>
+          <div id="handPoseJointFields" class="hand-pose-joint-fields"></div>
+          <div class="dialog-actions"><button type="button" class="cancel" data-action="hand-pose-close">取消</button><button class="primary" type="submit">保存姿态</button></div>
+        </form>
+      </dialog>
     </section>
 
     <section id="tasksView" class="view">
@@ -383,6 +427,6 @@
   </div>
 
   <script src="/hand-preview.js?v=20260831-integrated-preview-2" defer></script>
-  <script src="/app.js?v=20260831-hand-sidebar-order" defer></script>
+  <script src="/app.js?v=20260903-hand-panel-order" defer></script>
 </body>
 </html>

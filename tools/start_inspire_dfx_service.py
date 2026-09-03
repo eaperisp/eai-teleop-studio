@@ -19,13 +19,6 @@ DEFAULT_DFX_SERIAL_HINTS = (
 )
 
 
-def hand_id(value: str) -> int:
-    parsed = int(value)
-    if not 0 <= parsed <= 247:
-        raise argparse.ArgumentTypeError("hand ID must be between 0 (disabled) and 247")
-    return parsed
-
-
 def existing_path(raw_path: str | None) -> Path | None:
     if not raw_path:
         return None
@@ -101,16 +94,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--serial-match", default=None, help="Substring used to filter serial candidates.")
     parser.add_argument("--network", default=os.getenv("DDS_IFACE"), required=os.getenv("DDS_IFACE") is None)
     parser.add_argument(
-        "--right-id",
-        type=hand_id,
-        default=hand_id(os.getenv("INSPIRE_DFX_RIGHT_ID", "1")),
-        help="Serial device ID published as the DDS right hand; 0 disables it.",
-    )
-    parser.add_argument(
-        "--left-id",
-        type=hand_id,
-        default=hand_id(os.getenv("INSPIRE_DFX_LEFT_ID", "2")),
-        help="Serial device ID published as the DDS left hand; 0 disables it.",
+        "--namespace",
+        default=os.getenv("INSPIRE_DFX_NAMESPACE", "inspire"),
+        help="DDS topic namespace passed to the official bridge.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print the resolved command without starting it.")
     parser.add_argument(
@@ -127,10 +113,9 @@ def main() -> int:
     if not service.exists():
         raise FileNotFoundError(f"service binary does not exist: {service}")
 
-    if args.left_id == 0 and args.right_id == 0:
-        raise ValueError("at least one Inspire hand ID must be enabled")
-    if args.left_id != 0 and args.left_id == args.right_id:
-        raise ValueError("left and right hand IDs must differ unless one side is disabled")
+    namespace = args.namespace.strip()
+    if not namespace:
+        raise ValueError("DDS namespace cannot be empty")
 
     serial = resolve_serial(args)
     command = [
@@ -139,17 +124,16 @@ def main() -> int:
         str(serial),
         "--network",
         args.network,
-        "--right-id",
-        str(args.right_id),
-        "--left-id",
-        str(args.left_id),
+        "--namespace",
+        namespace,
     ]
     if not args.no_sudo and os.geteuid() != 0:
         command = ["sudo", *command]
 
     print(f"Resolved serial: {serial}")
     print(f"DDS network: {args.network}")
-    print(f"Hand IDs: right={args.right_id or 'disabled'}, left={args.left_id or 'disabled'}")
+    print(f"DDS namespace: {namespace}")
+    print("Official DFX serial IDs: right=1, left=2")
     print("Command:", " ".join(command))
 
     if args.dry_run:

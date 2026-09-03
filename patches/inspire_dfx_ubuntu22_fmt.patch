@@ -2,12 +2,13 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 307706a..5e71424 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -18,6 +18,8 @@ if(POLICY CMP0167)
+@@ -18,6 +18,9 @@ if(POLICY CMP0167)
  endif()
  
  find_package(Boost COMPONENTS program_options REQUIRED)
-+find_package(fmt REQUIRED)
-+find_package(spdlog REQUIRED)
++set(fmt_DIR "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}/cmake/fmt" CACHE PATH "Ubuntu system fmt" FORCE)
++find_package(fmt CONFIG REQUIRED)
++find_package(spdlog CONFIG REQUIRED)
  
  include_directories(
    /usr/local/include/ddscxx

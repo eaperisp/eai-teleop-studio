@@ -389,11 +389,23 @@ class InspireAdapterTests(unittest.TestCase):
         self.assertEqual(states["left"].angles, (0.6, 0.7, 0.8, 0.9, 1.0, 1.1))
         self.assertEqual(states["left"].lost, (0, 0, 0, 0, 0, 0))
 
-    def test_dfx_lost_feedback_is_reported_offline(self):
+    def test_dfx_stable_cumulative_lost_feedback_is_online(self):
         with patch.object(InspireDFXAdapter, "sdk_type", FakeInspireSDK):
             with patch.object(FakeInspireSDK, "state_lost", [3] * 6):
                 adapter = InspireDFXAdapter()
                 adapter.connect("dds", {"sides": "left"})
+                status = adapter.status()
+
+        self.assertTrue(status["hands"]["left"]["online"])
+        self.assertIsNotNone(status["hands"]["left"]["positions"])
+        self.assertEqual(status["error"], "")
+
+    def test_dfx_advancing_lost_feedback_is_reported_offline(self):
+        with patch.object(InspireDFXAdapter, "sdk_type", FakeInspireSDK):
+            with patch.object(FakeInspireSDK, "state_lost", [3] * 6):
+                adapter = InspireDFXAdapter()
+                adapter.connect("dds", {"sides": "left"})
+            with patch.object(FakeInspireSDK, "state_lost", [4] * 6):
                 status = adapter.status()
 
         self.assertFalse(status["hands"]["left"]["online"])

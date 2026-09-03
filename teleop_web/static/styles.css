@@ -1118,6 +1118,7 @@ tbody tr:hover{background:#123452}
 .motor-debug-layout{display:grid;grid-template-columns:minmax(520px,1.35fr) minmax(320px,.8fr);gap:16px;align-items:start}
 .motor-debug-wide{grid-column:1/-1}
 .motor-debug-main{min-width:0}
+.motor-debug-sidebar{display:grid;gap:16px;align-content:start;min-width:0}
 .motor-debug-badge{display:inline-flex;align-items:center;max-width:320px;min-height:28px;border:1px solid rgba(56,247,131,.42);border-radius:5px;padding:4px 9px;color:#38f783;background:rgba(56,247,131,.1);font-size:12px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .motor-debug-badge.connected{color:#061424;background:#38f783;border-color:#38f783}
 .motor-debug-form{display:grid;grid-template-columns:1fr;gap:12px;padding:16px}
@@ -1154,6 +1155,7 @@ tbody tr:hover{background:#123452}
 .motor-safety-panel .warn{border-color:rgba(255,212,90,.42)}
 .motor-safety-panel .warn strong{color:#ffd45a}
 .motor-spec-panel{display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:10px;padding:16px}
+.motor-debug-sidebar .motor-spec-panel{grid-template-columns:repeat(3,minmax(0,1fr))}
 .motor-command{margin:16px}
 .motor-log-panel{display:grid;gap:8px;padding:0 16px 16px}
 .motor-log-panel>div:not(.data-preview-empty){display:grid;grid-template-columns:160px minmax(90px,.35fr) minmax(280px,1fr);gap:10px;align-items:center;border:1px solid #1d456b;border-radius:7px;background:#081b2e;padding:9px 10px}
@@ -1161,30 +1163,58 @@ tbody tr:hover{background:#123452}
 .motor-log-panel strong{color:#dff7ff;font-size:13px}
 .motor-log-panel code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8fe8ff;font-size:12px}
 .motor-guide-panel{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:10px;padding:16px}
+.motor-debug-sidebar .motor-guide-panel{grid-template-columns:repeat(2,minmax(0,1fr))}
 .motor-guide-panel>div{display:grid;grid-template-columns:28px 1fr;gap:10px;align-items:start;border:1px solid #1d456b;border-radius:7px;background:#081b2e;padding:11px}
 .motor-guide-panel span{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;color:#061424;background:#35c8ff;font-weight:900}
 .motor-guide-panel p{margin:0;color:#d4efff;font-size:12px;line-height:1.55}
-.hand-debug-layout{display:grid;grid-template-columns:minmax(560px,1.35fr) minmax(320px,.8fr);gap:16px;align-items:start}
-.hand-debug-wide{grid-column:1/-1}
-.hand-debug-main{min-width:0}
-.hand-debug-sidebar{display:grid;gap:16px;min-width:0;align-content:start}
-.hand-preview-panel{overflow:hidden}
-.hand-preview-side{color:#8fe8ff;font-size:12px;font-weight:800}
-.hand-preview-stage{position:relative;width:100%;height:360px;min-height:300px;overflow:hidden;border-top:1px solid #1d456b;background:#f4f6f7}
-.hand-preview-stage canvas{display:block;width:100%;height:100%;touch-action:none}
-.hand-preview-state{position:absolute;inset:0;z-index:1;display:grid;place-items:center;padding:20px;background:#f4f6f7;color:#68737c;font-size:12px;text-align:center;pointer-events:none}
-.hand-preview-state.hidden{display:none}
-.hand-debug-form{display:grid;gap:12px;padding:16px}
-.hand-debug-form label{display:grid;gap:6px;min-width:0}
-.hand-debug-form span{color:#9fd8ff;font-size:12px;font-weight:800}
-.hand-debug-form input,.hand-debug-form select{width:100%;height:40px;border:1px solid #256895;border-radius:6px;padding:0 10px;background:#061522;color:#fff;outline:0}
-.hand-debug-form input:focus,.hand-debug-form select:focus{border-color:#4ad8ff;box-shadow:0 0 0 2px rgba(74,216,255,.18)}
-.hand-connection-group{grid-template-columns:repeat(2,minmax(160px,1fr))}
-.hand-connection-fields{display:grid;grid-column:1/-1;grid-template-columns:repeat(3,minmax(150px,1fr));gap:12px}
-.hand-command-group{grid-template-columns:repeat(3,minmax(150px,1fr))}
-.hand-live-toggle input{width:auto;height:auto;justify-self:start}
-.hand-joint-panel{display:grid;gap:10px}
-.hand-joint-row{display:grid;grid-template-columns:minmax(150px,.9fr) minmax(220px,1.5fr) 92px 90px;gap:12px;align-items:center;border:1px solid #1d456b;border-radius:8px;background:#071827;padding:10px 12px}
+.hand-console-layout{display:grid;grid-template-columns:270px minmax(0,1fr);gap:14px;align-items:start}
+.hand-console-sidebar{display:grid;grid-template-rows:auto auto;gap:14px;align-content:start;min-width:0}
+.hand-console-main{display:grid;grid-template-rows:auto auto;align-content:start;gap:14px;min-width:0}
+.hand-section-index{display:inline-block;margin-right:8px;color:#4ad8ff;font:800 10px/1.2 "JetBrains Mono","Cascadia Mono",Consolas,monospace}
+.training-panel-head>div:has(.hand-section-index){display:flex;align-items:center;min-width:0}
+.training-panel-head>div:has(.hand-section-index) h2{margin:0}
+.hand-connection-form{display:grid;gap:10px;padding:12px}
+.hand-connection-form label,.hand-toolbar-controls label,.hand-command-bar label{display:grid;gap:6px;min-width:0}
+.hand-connection-form label>span,.hand-toolbar-controls label>span,.hand-command-bar label>span{color:#9fd8ff;font-size:11px;font-weight:800}
+.hand-connection-form input,.hand-connection-form select,.hand-toolbar-controls select,.hand-command-bar input{width:100%;height:38px;border:1px solid #256895;border-radius:6px;padding:0 10px;background:#061522;color:#fff;outline:0}
+.hand-connection-form input:focus,.hand-connection-form select:focus,.hand-toolbar-controls select:focus,.hand-command-bar input:focus{border-color:#4ad8ff;box-shadow:0 0 0 2px rgba(74,216,255,.18)}
+.hand-connection-form input:disabled,.hand-connection-form select:disabled{opacity:.58;cursor:not-allowed}
+.hand-connection-fields{display:grid;gap:10px}
+.hand-connection-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.hand-connection-actions button{min-height:36px}
+.hand-connection-facts{display:grid;gap:0;margin:2px -12px -12px;border-top:1px solid #1d456b;padding:4px 12px}
+.hand-connection-facts>div{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid rgba(45,103,152,.35)}
+.hand-connection-facts>div:last-child{border-bottom:0}
+.hand-connection-facts span{color:#8fb8d9;font-size:11px}
+.hand-connection-facts strong{min-width:0;overflow:hidden;text-overflow:ellipsis;color:#dff7ff;font-size:11px;white-space:nowrap;text-align:right}
+.hand-activity-panel{display:flex;min-height:0;flex-direction:column}
+.hand-text-button{border:0;padding:2px 0;background:transparent;color:#4ad8ff;font-size:12px}
+.hand-activity-list{display:grid;align-content:start;gap:0;min-height:0;max-height:276px;overflow:auto;padding:4px 12px 10px}
+.hand-activity-list .data-preview-empty{padding:20px 8px}
+.hand-activity-row{display:grid;grid-template-columns:58px minmax(0,1fr);gap:8px;height:45px;overflow:hidden;border-bottom:1px solid rgba(45,103,152,.35);padding:6px 0}
+.hand-activity-row:last-child{border-bottom:0}
+.hand-activity-row time{color:#6fa8cf;font:700 10px/1.4 "JetBrains Mono","Cascadia Mono",Consolas,monospace}
+.hand-activity-row strong,.hand-activity-row span{display:block}
+.hand-activity-row strong{overflow:hidden;color:#dff7ff;font-size:11px;text-overflow:ellipsis;white-space:nowrap}
+.hand-activity-row span{margin-top:3px;overflow:hidden;color:#89b6d5;font-size:10px;line-height:1.45;text-overflow:ellipsis;white-space:nowrap}
+.hand-control-toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:64px;border:1px solid #2b6798;border-radius:8px;padding:10px 16px;background:#0b2036}
+.hand-control-toolbar>div:first-child strong,.hand-control-toolbar>div:first-child span{display:block}
+.hand-control-toolbar>div:first-child strong{color:#fff;font-size:14px}
+.hand-control-toolbar>div:first-child span{margin-top:3px;color:#8fb8d9;font-size:11px}
+.hand-toolbar-controls{display:flex;align-items:end;gap:16px}
+.hand-toolbar-controls label:first-child{grid-template-columns:auto 120px;align-items:center}
+.hand-live-switch{display:flex!important;align-items:center!important;gap:8px!important;height:38px;cursor:pointer}
+.hand-live-switch input{position:absolute;opacity:0;pointer-events:none}
+.hand-live-switch i{position:relative;width:34px;height:18px;border:1px solid #3275aa;border-radius:10px;background:#071827}
+.hand-live-switch i:after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#8fb8d9;transition:transform .16s ease,background .16s ease}
+.hand-live-switch input:checked+i{border-color:#38f783;background:#0b3428}
+.hand-live-switch input:checked+i:after{transform:translateX(16px);background:#38f783}
+.hand-live-switch input:disabled+i,.hand-live-switch input:disabled~span{opacity:.45;cursor:not-allowed}
+.hand-control-grid{display:grid;grid-template-columns:minmax(650px,1.55fr) minmax(330px,.78fr);gap:14px;align-items:start}
+.hand-joint-card{display:flex;min-width:0;align-self:start;flex-direction:column}
+.hand-joint-panel{display:grid;grid-auto-rows:89px;gap:0;padding:0 16px}
+.hand-joint-row{display:grid;grid-template-columns:minmax(132px,.75fr) minmax(260px,1.55fr) 92px 72px;gap:12px;align-items:center;border-bottom:1px solid #1d456b;padding:10px 0}
+.hand-joint-row:last-child{border-bottom:0}
 .hand-joint-name{min-width:0}
 .hand-joint-name strong{display:block;color:#fff;font-size:13px;line-height:1.3}
 .hand-joint-name span{display:block;margin-top:3px;color:#8fb8d9;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -1201,6 +1231,73 @@ tbody tr:hover{background:#123452}
 .hand-joint-row label span,.hand-joint-row>div:last-child span{color:#9fd8ff;font-size:11px;font-weight:800}
 .hand-joint-row input[type="number"]{width:100%;height:34px;border:1px solid #256895;border-radius:6px;padding:0 8px;background:#061522;color:#fff;outline:0}
 .hand-actual-value strong{display:block;color:#ffd45a;font-size:12px}
+.hand-command-bar{display:flex;align-items:end;justify-content:flex-end;gap:10px;border-top:1px solid #2b6798;padding:12px 16px}
+.hand-command-bar label{position:relative;width:150px;margin-right:auto}
+.hand-command-bar label i{position:absolute;right:10px;bottom:11px;color:#8fb8d9;font-size:11px;font-style:normal}
+.hand-command-bar label input{padding-right:34px}
+.hand-command-bar button{height:38px;min-width:88px}
+.hand-control-summary{margin:0 16px 16px}
+.hand-preview-column{display:grid;align-self:start;gap:14px;min-width:0}
+.hand-preview-column>.training-panel:first-child .motor-spec-panel{gap:6px;padding:6px}
+.hand-preview-column>.training-panel:first-child .motor-spec-panel>div{padding:4px 10px}
+.hand-preview-column>.training-panel:first-child .motor-spec-panel span{margin-bottom:2px}
+.hand-preview-panel{overflow:hidden}
+.hand-preview-side{color:#8fe8ff;font-size:12px;font-weight:800}
+.hand-preview-stage{position:relative;width:100%;height:280px;min-height:280px;overflow:hidden;border-bottom:1px solid #1d456b;background:#f4f6f7}
+.hand-preview-stage canvas{display:block;width:100%;height:100%;touch-action:none}
+.hand-preview-state{position:absolute;inset:0;z-index:1;display:grid;place-items:center;padding:20px;background:#f4f6f7;color:#68737c;font-size:12px;text-align:center;pointer-events:none}
+.hand-preview-state.hidden{display:none}
+.hand-pose-library{padding:12px 14px 14px}
+.hand-pose-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-bottom:8px}
+.hand-pose-heading strong,.hand-pose-heading span{display:block}
+.hand-pose-heading strong{color:#fff;font-size:12px}
+.hand-pose-heading span{margin-top:3px;color:#8fb8d9;font-size:10px}
+.hand-pose-list{display:grid}
+.hand-pose-item{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:40px;border-top:1px solid rgba(45,103,152,.45);padding:6px 0}
+.hand-pose-item>div:first-child{min-width:0}
+.hand-pose-item strong,.hand-pose-item span{display:block}
+.hand-pose-item strong{color:#dff7ff;font-size:12px}
+.hand-pose-item span{margin-top:3px;color:#8fb8d9;font-size:10px}
+.hand-pose-actions{display:flex;align-items:center;gap:6px}
+.hand-icon-button{display:grid;place-items:center;width:30px;height:30px;border:1px solid #3275aa;border-radius:5px;padding:0;background:#0d2740;color:#8fe8ff;font-size:16px}
+.hand-icon-button.danger{border-color:#d94f76;color:#ff6f8e;background:#35172b}
+.hand-pose-dialog{width:min(650px,calc(100vw - 32px));max-height:calc(100vh - 40px);border:1px solid #3275aa;border-radius:8px;padding:0;background:#081b2e;color:#f4fbff;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+.hand-pose-dialog::backdrop{background:rgba(2,9,16,.72)}
+.hand-pose-dialog form{padding:0}
+.hand-pose-dialog-head{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid #2b6798;background:#0b2036}
+.hand-pose-dialog-head>div{display:flex;align-items:center}
+.hand-pose-dialog-head h2{margin:0;font-size:16px}
+.hand-pose-dialog-head .close{color:#8fb8d9}
+.hand-pose-name-fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:16px}
+.hand-pose-name-fields label,.hand-pose-joint-fields label{display:grid;gap:6px;min-width:0}
+.hand-pose-name-fields span,.hand-pose-joint-fields span{color:#9fd8ff;font-size:11px;font-weight:800}
+.hand-pose-name-fields input,.hand-pose-joint-fields input{width:100%;height:38px;border:1px solid #256895;border-radius:6px;padding:0 10px;background:#061522;color:#fff;outline:0}
+.hand-pose-joint-head{display:flex;justify-content:space-between;padding:0 16px 8px;color:#dff7ff;font-size:12px}
+.hand-pose-joint-head span{color:#8fb8d9;font-size:10px}
+.hand-pose-joint-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;padding:0 16px 16px}
+.hand-pose-joint-fields label{position:relative}
+.hand-pose-joint-fields label small{color:#6fa8cf}
+.hand-pose-joint-fields label i{position:absolute;right:10px;bottom:11px;color:#8fb8d9;font-size:11px;font-style:normal}
+.hand-pose-joint-fields input{padding-right:30px}
+.hand-pose-dialog .dialog-actions{margin:0;padding:14px 16px;border-color:#2b6798}
+.hand-pose-dialog .cancel{background:#0d2740}
+.hand-console-layout button:disabled{opacity:.42;cursor:not-allowed}
+@media(max-width:1450px){
+  .hand-control-grid{grid-template-columns:1fr}
+  .hand-preview-column{grid-template-columns:minmax(320px,1fr) minmax(300px,.8fr);align-items:start}
+}
+@media(max-width:1200px){
+  .motor-debug-layout{grid-template-columns:1fr}
+  .motor-debug-wide{grid-column:auto}
+  .motor-debug-sidebar{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .motor-debug-sidebar .motor-spec-panel{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .motor-debug-sidebar .motor-guide-panel{grid-template-columns:1fr}
+}
+@media(max-width:1100px){
+  .hand-console-layout{grid-template-columns:1fr}
+  .hand-console-sidebar{grid-template-columns:minmax(280px,.8fr) minmax(340px,1.2fr);grid-template-rows:auto}
+  .hand-activity-panel{min-height:0}
+}
 .training-command-card{padding-bottom:18px;background:transparent}
 .training-command-card .manual-param-panel{margin:0 0 18px}
 .training-command-card .manual-command-section{padding:0 0 18px}
@@ -1245,9 +1342,17 @@ tbody tr:hover{background:#123452}
 .manual-command pre{margin:0;padding:16px 18px;max-height:none!important;overflow:visible!important;color:#d6f6ff;background:#030b13;font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"JetBrains Mono","Cascadia Mono","SFMono-Regular",Consolas,monospace}
 .manual-command code{font-family:inherit}
 @media(max-width:900px){
-  .motor-debug-layout,.motor-debug-form,.motor-field-group,.motor-advanced-fields>div,.motor-safety-panel,.motor-spec-panel,.motor-guide-panel,.motor-log-panel>div:not(.data-preview-empty),.hand-debug-layout,.hand-debug-form,.hand-connection-group,.hand-connection-fields,.hand-command-group,.hand-joint-row{grid-template-columns:1fr}
+  .motor-debug-layout,.motor-debug-sidebar,.motor-debug-form,.motor-field-group,.motor-advanced-fields>div,.motor-safety-panel,.motor-spec-panel,.motor-guide-panel,.motor-log-panel>div:not(.data-preview-empty),.hand-console-sidebar,.hand-preview-column,.hand-joint-row{grid-template-columns:1fr}
+  .sidebar .nav-item{display:flex;font-size:0}
+  .sidebar .nav-item span{font-size:14px}
   .motor-field-group-head{display:grid}
   .hand-preview-stage{height:320px}
+  .hand-control-toolbar,.hand-toolbar-controls{align-items:stretch;flex-direction:column}
+  .hand-toolbar-controls label:first-child{grid-template-columns:1fr}
+  .hand-command-bar{flex-wrap:wrap}
+  .hand-command-bar label{width:100%}
+  .hand-joint-row{gap:8px}
+  .hand-pose-name-fields,.hand-pose-joint-fields{grid-template-columns:1fr}
   .oss-transfer-grid{
     grid-template-columns:1fr;
   }

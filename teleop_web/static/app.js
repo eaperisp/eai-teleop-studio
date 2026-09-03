@@ -73,6 +73,11 @@ let handDebugState = JSON.parse(localStorage.getItem('teleop.handDebugState') ||
 let handDebugLogs = JSON.parse(localStorage.getItem('teleop.handDebugLogs') || '[]');
 let handLiveTimer = null;
 let handModelPreview = null;
+let handDebugPoses = [];
+let handPoseDeviceId = '';
+let handPoseLoading = false;
+let handEditingPoseId = null;
+let handFeedbackSeedKey = '';
 const TASK_PAGE_SIZE = 10;
 let dataPreviewState = {preview:null,index:0,taskId:null,episode:null};
 let dataListState = {taskId:'',page:1,pageSize:50,total:0,episodes:[],tasks:[],loading:false};
@@ -1435,6 +1440,7 @@ function renderMotorDebug() {
     live.motion?.stop_reason && !live.motion?.running ? {time: live.motion.finished_at, title: '运动停止', summary: live.motion.stop_reason} : null,
     live.last_frame ? {time: live.last_frame.sent_at, title: `已发送 ${live.last_action || ''}`, summary: `${live.last_frame.can_id} [${live.last_frame.dlc}] ${live.last_frame.data}`} : null,
     live.last_feedback ? {time: live.last_feedback.received_at, title: '反馈帧', summary: `${live.last_feedback.can_id} [${live.last_feedback.dlc}] ${live.last_feedback.data}`} : null,
+    live.last_rejected_feedback ? {time: live.last_rejected_feedback.received_at, title: '已忽略无效反馈', summary: `收到 ID ${live.last_rejected_feedback.motor_id ?? '未知'}，期望 ID ${live.last_rejected_feedback.expected_motor_id}`} : null,
   ].filter(Boolean);
   const rows = [...liveRows, ...motorDebugLogs].slice(0, 10);
   const logRows = rows.length
@@ -1658,6 +1664,84 @@ function updateHandModelPreview(device = selectedHandDevice(), positions = handP
   if (!handModelPreview) handModelPreview = new window.HandModelPreview(stage, state);
   handModelPreview.setPose(side, positions, device.preview);
 }
+function handStatusForSide(live, side) {
+  return live.hands?.[side] || {};
+}
+function handFeedbackReady(status, jointCount) {
+  const positions = status?.positions;
+  return Array.isArray(positions)
+    && positions.length === jointCount
+    && positions.every(value => Number.isFinite(Number(value)));
+}
+function seedHandTargetFromFeedback(live, side) {
+  const status = handStatusForSide(live, side);
+  const actual = Array.isArray(status.positions) ? status.positions : null;
+  if (!live.connected || !actual) return actual;
+  const seedKey = `${live.device_id || ''}:${live.connected_at || ''}:${side}`;
+  if (handFeedbackSeedKey !== seedKey) {
+    handDebugState.positions = actual.slice();
+    handDebugState.side = side;
+    handFeedbackSeedKey = seedKey;
+    localStorage.setItem('teleop.handDebugState', JSON.stringify(handDebugState));
+  }
+  return actual;
+}
+function renderHandConnectionFacts(device, transport, live, side) {
+  const container = $('#handConnectionFacts');
+  if (!container) return;
+  const hands = Object.values(live.hands || {});
+  const onlineCount = hands.filter(item => item?.online).length;
+  const readyCount = hands.filter(item => handFeedbackReady(item, device.joints?.length || 0)).length;
+  const feedback = !live.connected
+    ? '未连接'
+    : onlineCount
+      ? `${onlineCount}/${hands.length} 在线`
+      : readyCount
+        ? `${readyCount}/${hands.length} 已同步`
+        : '等待反馈';
+  container.innerHTML = [
+    ['反馈', feedback],
+    ['当前', handSideLabel(side)],
+  ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
+}
+function renderHandPoseLibrary(device = selectedHandDevice()) {
+  const list = $('#handPoseList');
+  if (!list) return;
+  $('#handPoseHint').textContent = $('#handLiveToggle')?.checked ? '载入后立即发送' : '载入后由“执行姿态”确认发送';
+  if (handPoseLoading) {
+    list.innerHTML = '<div class="data-preview-empty compact">姿态加载中...</div>';
+    return;
+  }
+  if (handPoseDeviceId !== device?.id) {
+    list.innerHTML = '<div class="data-preview-empty compact">正在读取姿态库</div>';
+    return;
+  }
+  list.innerHTML = handDebugPoses.length ? handDebugPoses.map(pose => `
+    <div class="hand-pose-item">
+      <div><strong>${escapeHtml(pose.description_zh)}</strong><span>${escapeHtml(pose.name_en)}</span></div>
+      <div class="hand-pose-actions">
+        <button class="action blue" type="button" data-action="hand-pose-apply" data-pose-id="${escapeHtml(pose.id)}">载入</button>
+        <button class="hand-icon-button" type="button" title="编辑姿态" aria-label="编辑姿态" data-action="hand-pose-edit" data-pose-id="${escapeHtml(pose.id)}">✎</button>
+        <button class="hand-icon-button danger" type="button" title="删除姿态" aria-label="删除姿态" data-action="hand-pose-delete" data-pose-id="${escapeHtml(pose.id)}">×</button>
+      </div>
+    </div>`).join('') : '<div class="data-preview-empty compact">暂无保存的姿态</div>';
+}
+async function loadHandPoses(device = selectedHandDevice(), force = false) {
+  if (!device || handPoseLoading || (!force && handPoseDeviceId === device.id)) return;
+  handPoseLoading = true;
+  renderHandPoseLibrary(device);
+  try {
+    const result = await api(`/api/hand/poses?device_id=${encodeURIComponent(device.id)}`);
+    handDebugPoses = Array.isArray(result.poses) ? result.poses : [];
+    handPoseDeviceId = device.id;
+  } catch (error) {
+    handPoseDeviceId = '';
+    showNotice(error.message);
+  } finally {
+    handPoseLoading = false;
+    renderHandPoseLibrary(device);
+  }
+}
 function renderHandDebug() {
   const deviceSelect = $('#handDeviceSelect');
   if (!deviceSelect) return;
@@ -1669,34 +1753,36 @@ function renderHandDebug() {
     return;
   }
   const live = appState.hand_debug?.status || {};
-  const selectedId = handDebugState.deviceId || appState.hand_debug?.default_device || devices[0].id;
+  const selectedId = (live.connected && live.device_id) || handDebugState.deviceId || appState.hand_debug?.default_device || devices[0].id;
   deviceSelect.innerHTML = devices.map(device => `<option value="${escapeHtml(device.id)}" ${device.id === selectedId ? 'selected' : ''}>${escapeHtml(device.name)}</option>`).join('');
   const device = selectedHandDevice();
   const configured = appState.hand_debug?.defaults?.[device.id] || {};
-  const transportId = handDebugState.transportId || configured.default_transport || device.transports?.[0]?.id || '';
+  const transportId = (live.connected && live.transport) || handDebugState.transportId || configured.default_transport || device.transports?.[0]?.id || '';
   const transportSelect = $('#handTransportSelect');
   transportSelect.innerHTML = (device.transports || []).map(transport => `<option value="${escapeHtml(transport.id)}" ${transport.id === transportId ? 'selected' : ''}>${escapeHtml(transport.name)}</option>`).join('');
   renderHandConnectionFields(device, selectedHandTransport(device));
   const options = handConnectionOptions();
   const sides = live.connected ? Object.keys(live.hands || {}) : deriveHandSides(options);
-  const side = sides.includes(handDebugState.side) ? handDebugState.side : (sides[0] || 'right');
+  const onlineSide = sides.find(item => live.hands?.[item]?.online);
+  const readySide = sides.find(item => handFeedbackReady(live.hands?.[item], device.joints?.length || 0));
+  const fallbackSide = sides.includes('right') ? 'right' : (sides[0] || 'right');
+  const side = sides.includes(handDebugState.side) ? handDebugState.side : (onlineSide || readySide || fallbackSide);
   $('#handSideSelect').innerHTML = sides.map(item => `<option value="${escapeHtml(item)}" ${item === side ? 'selected' : ''}>${handSideLabel(item)}</option>`).join('');
   $('#handDurationMs').value = handDebugState.durationMs || 500;
   $('#handLiveToggle').checked = Boolean(handDebugState.live);
-  $('#handDebugBadge').textContent = live.connected ? `已连接 ${device.name} · ${selectedHandTransport(device)?.name || live.transport}` : `${device.name} · 未连接`;
+  $('#handDebugBadge').textContent = live.connected ? '已连接' : '未连接';
   $('#handDebugBadge').classList.toggle('connected', Boolean(live.connected));
+  renderHandConnectionFacts(device, selectedHandTransport(device), live, side);
   $('#handSpecPanel').innerHTML = [
-    ['型号', `${device.manufacturer || ''} ${device.model || device.name}`.trim()],
-    ['通信方式', (device.transports || []).map(item => item.name).join(' / ')],
-    ['控制范围', `${device.position_convention?.open ?? 0} 张开 / ${device.position_convention?.closed ?? 1} 闭合`],
+    ['品牌', device.manufacturer || '-'],
+    ['型号', device.model || device.name],
     ['关节数量', `${device.joints?.length || 0}`],
-    ['当前连接', live.connected ? `${live.device_id || device.id} · ${live.transport || selectedHandTransport(device)?.id}` : '未连接'],
-    ['控制源', live.control_owner || '手动'],
+    ['位置定义', `${device.position_convention?.open ?? 0} 张开 / ${device.position_convention?.closed ?? 1} 闭合`],
   ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
+  const handStatus = handStatusForSide(live, side);
+  const actual = seedHandTargetFromFeedback(live, side);
   const positions = handPositions(device);
   updateHandModelPreview(device, positions);
-  const handStatus = live.hands?.[side] || {};
-  const actual = Array.isArray(handStatus.positions) ? handStatus.positions : null;
   $('#handJointPanel').innerHTML = (device.joints || []).map((joint, index) => {
     const target = Math.round((positions[index] ?? 0) * 100);
     const actualValue = actual ? Math.round((Number(actual[index]) || 0) * 100) : null;
@@ -1718,14 +1804,26 @@ function renderHandDebug() {
     `positions=[${handPositions(device).map(value => value.toFixed(2)).join(', ')}]`,
   ].join(' ');
   $('#handCommandText').textContent = summary;
+  renderHandPoseLibrary(device);
+  if (handPoseDeviceId !== device.id && !handPoseLoading) void loadHandPoses(device);
+  const connected = Boolean(live.connected);
+  const selectedReady = handFeedbackReady(handStatus, device.joints?.length || 0);
+  deviceSelect.disabled = connected;
+  transportSelect.disabled = connected;
+  $$('#handConnectionFields input, #handConnectionFields select').forEach(input => { input.disabled = connected; });
+  $('[data-action="hand-connect"]').disabled = connected;
+  $('[data-action="hand-disconnect"]').disabled = !connected;
+  $('[data-action="hand-command"]').disabled = !connected || !selectedReady;
+  $('[data-action="hand-stop"]').disabled = !connected;
+  $('#handLiveToggle').disabled = !connected || !selectedReady;
   const statusRows = [
     live.error ? {time: appState.hand_debug?.updated_at, title: '后端错误', summary: live.error} : null,
     live.connected ? {time: live.connected_at ? new Date(live.connected_at * 1000).toISOString() : appState.hand_debug?.updated_at, title: '连接状态', summary: `${live.device_id || device.id} ${live.transport || ''}`} : null,
-    handStatus.online != null ? {time: handStatus.last_state_at ? new Date(handStatus.last_state_at * 1000).toISOString() : appState.hand_debug?.updated_at, title: `${handSideLabel(side)}反馈`, summary: handStatus.online ? '在线' : '暂无在线反馈'} : null,
+    handStatus.online != null ? {time: handStatus.last_state_at ? new Date(handStatus.last_state_at * 1000).toISOString() : appState.hand_debug?.updated_at, title: `${handSideLabel(side)}反馈`, summary: handStatus.online ? '在线' : selectedReady ? '姿态已同步，等待新反馈' : '暂无有效反馈'} : null,
   ].filter(Boolean);
-  const rows = [...statusRows, ...handDebugLogs].slice(0, 10);
+  const rows = [...statusRows, ...handDebugLogs].slice(0, 5);
   $('#handLogPanel').innerHTML = rows.length
-    ? rows.map(item => `<div><span>${escapeHtml(formatTime(item.time))}</span><strong>${escapeHtml(item.title)}</strong><code>${escapeHtml(item.summary)}</code></div>`).join('')
+    ? rows.map(item => `<div class="hand-activity-row"><time>${escapeHtml(formatTime(item.time))}</time><div><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.summary)}</span></div></div>`).join('')
     : '<div class="data-preview-empty compact">暂无调试记录</div>';
 }
 function updateHandJoint(index, percent) {
@@ -1756,8 +1854,12 @@ function updateHandDeviceSelection() {
   const device = selectedHandDevice();
   handDebugState.transportId = appState.hand_debug?.defaults?.[device?.id || '']?.default_transport || device?.transports?.[0]?.id;
   handDebugState.positions = handDefaultPositions(device);
+  handFeedbackSeedKey = '';
+  handPoseDeviceId = '';
+  handDebugPoses = [];
   localStorage.setItem('teleop.handDebugState', JSON.stringify(handDebugState));
   renderHandDebug();
+  void loadHandPoses(device, true);
 }
 function updateHandTransportSelection() {
   handDebugState.transportId = $('#handTransportSelect')?.value || handDebugState.transportId;
@@ -1786,6 +1888,16 @@ async function runHandDebugCommand(command) {
     }[command];
     const result = await api(path, command === 'disconnect' || command === 'stop' ? {} : payload);
     appState.hand_debug = result.hand_debug || appState.hand_debug || {};
+    if (command === 'connect' || command === 'disconnect') {
+      handFeedbackSeedKey = '';
+      const hands = appState.hand_debug?.status?.hands || {};
+      const availableSide = Object.keys(hands).find(side => hands[side]?.online)
+        || Object.keys(hands).find(side => handFeedbackReady(hands[side], device?.joints?.length || 0));
+      if (command === 'connect' && availableSide) {
+        handDebugState.side = availableSide;
+        localStorage.setItem('teleop.handDebugState', JSON.stringify(handDebugState));
+      }
+    }
     handDebugLogs = [{
       time: new Date().toISOString(),
       title: labels[command] || command,
@@ -1808,9 +1920,79 @@ function scheduleHandLiveCommand() {
 }
 async function refreshHandDebug() {
   try {
+    handFeedbackSeedKey = '';
     await refresh(false);
+    await loadHandPoses(selectedHandDevice(), true);
     renderHandDebug();
     showNotice('灵巧手状态已刷新', 'success');
+  } catch (error) {
+    showNotice(error.message);
+  }
+}
+function handPoseById(poseId) {
+  return handDebugPoses.find(pose => pose.id === poseId) || null;
+}
+function openHandPoseDialog(pose = null) {
+  const dialog = $('#handPoseDialog');
+  const device = selectedHandDevice();
+  if (!dialog || !device) return;
+  handEditingPoseId = pose?.id || null;
+  $('#handPoseDialogTitle').textContent = pose ? '编辑姿态' : '新增姿态';
+  $('#handPoseNameEn').value = pose?.name_en || '';
+  $('#handPoseDescriptionZh').value = pose?.description_zh || '';
+  const positions = pose?.positions || handPositions(device);
+  $('#handPoseJointFields').innerHTML = (device.joints || []).map((joint, index) => `
+    <label><span>${escapeHtml(joint.name)} <small>${escapeHtml(joint.english_name || joint.id || '')}</small></span><input type="number" min="0" max="100" step="1" value="${Math.round((positions[index] || 0) * 100)}" data-hand-pose-joint="${index}" required><i>%</i></label>`).join('');
+  if (typeof dialog.showModal === 'function') dialog.showModal();
+  else dialog.setAttribute('open', '');
+}
+function closeHandPoseDialog() {
+  const dialog = $('#handPoseDialog');
+  if (!dialog) return;
+  if (typeof dialog.close === 'function') dialog.close();
+  else dialog.removeAttribute('open');
+  handEditingPoseId = null;
+}
+async function saveHandPose(event) {
+  event.preventDefault();
+  const device = selectedHandDevice();
+  if (!device) return;
+  const positions = $$('#handPoseJointFields [data-hand-pose-joint]').map(input => Number(input.value) / 100);
+  try {
+    const result = await api('/api/hand/poses/save', {
+      id: handEditingPoseId || undefined,
+      device_id: device.id,
+      name_en: $('#handPoseNameEn').value,
+      description_zh: $('#handPoseDescriptionZh').value,
+      positions,
+    });
+    handDebugPoses = Array.isArray(result.poses) ? result.poses : handDebugPoses;
+    handPoseDeviceId = device.id;
+    closeHandPoseDialog();
+    renderHandPoseLibrary(device);
+    showNotice('姿态已保存', 'success');
+  } catch (error) {
+    showNotice(error.message);
+  }
+}
+async function applyHandPose(poseId) {
+  const pose = handPoseById(poseId);
+  if (!pose) return;
+  handDebugState.positions = pose.positions.slice();
+  localStorage.setItem('teleop.handDebugState', JSON.stringify(handDebugState));
+  renderHandDebug();
+  if ($('#handLiveToggle')?.checked) await runHandDebugCommand('command');
+  else showNotice(`已载入姿态：${pose.description_zh}`, 'success');
+}
+async function deleteHandPose(poseId) {
+  const pose = handPoseById(poseId);
+  const device = selectedHandDevice();
+  if (!pose || !device || !window.confirm(`确定删除姿态“${pose.description_zh}”吗？`)) return;
+  try {
+    const result = await api('/api/hand/poses/delete', {device_id: device.id, id: pose.id});
+    handDebugPoses = Array.isArray(result.poses) ? result.poses : handDebugPoses.filter(item => item.id !== pose.id);
+    renderHandPoseLibrary(device);
+    showNotice('姿态已删除', 'success');
   } catch (error) {
     showNotice(error.message);
   }
@@ -2204,6 +2386,7 @@ function isLogAutoRefreshNeeded() {
   return Boolean($('#controlModal')?.classList.contains('open') || $('#postprocessModal')?.classList.contains('open'));
 }
 async function refresh(silent = true, options = {}) {
+  if (silent && options.auto && activeView === 'handDebug') return;
   if (silent && document.activeElement?.closest('.template-editor-row,.manual-doc-form,.manual-advanced-panel')) return;
   if (silent && activeView === 'oss' && document.activeElement?.closest('.oss-local-toolbar,.oss-root-line,.oss-transfer-grid,.oss-package-row')) return;
   if (refreshInFlight || (silent && Date.now() < userInteractingUntil)) return;
@@ -2705,6 +2888,7 @@ $('#dataListPageJump')?.addEventListener('input', event => {
 });
 $('#dataListPageJump')?.addEventListener('change', event => jumpDataListPage(event.currentTarget));
 $('#dataListPageJump')?.addEventListener('blur', event => jumpDataListPage(event.currentTarget));
+$('#handPoseForm')?.addEventListener('submit', saveHandPose);
 document.addEventListener('change', event => {
   if (event.target?.closest('#motorDebugView')) {
     renderMotorDebug();
@@ -3112,6 +3296,32 @@ document.addEventListener('click', async event => {
   }
   if(action==='hand-stop'){
     await runHandDebugCommand('stop');
+    return;
+  }
+  if(action==='hand-clear-log'){
+    handDebugLogs = [];
+    localStorage.removeItem('teleop.handDebugLogs');
+    renderHandDebug();
+    return;
+  }
+  if(action==='hand-pose-add'){
+    openHandPoseDialog();
+    return;
+  }
+  if(action==='hand-pose-edit'){
+    openHandPoseDialog(handPoseById(button.dataset.poseId));
+    return;
+  }
+  if(action==='hand-pose-close'){
+    closeHandPoseDialog();
+    return;
+  }
+  if(action==='hand-pose-apply'){
+    await applyHandPose(button.dataset.poseId);
+    return;
+  }
+  if(action==='hand-pose-delete'){
+    await deleteHandPose(button.dataset.poseId);
     return;
   }
   if(action==='timestamp-now'){

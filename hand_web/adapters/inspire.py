@@ -86,6 +86,12 @@ def _capabilities(device_id: str, model: str, transport_name: str, description: 
             {"id": "open", "name": "张开", "name_en": "Open", "positions": [0.0] * HAND_DOF},
             {"id": "half", "name": "半握", "name_en": "Half Grip", "positions": [0.5] * HAND_DOF},
             {"id": "close", "name": "握合", "name_en": "Grip", "positions": [0.85] * HAND_DOF},
+            {
+                "id": "index_finger_extended",
+                "name": "食指伸出",
+                "name_en": "Index Finger Extended",
+                "positions": [0.0, 0.11, 0.0, 1.0, 1.0, 1.0],
+            },
         ],
         "preview": _preview_copy(),
         "transports": [{
@@ -126,12 +132,14 @@ class _InspireAdapterBase:
     sdk_type: type[Any]
     raw_scale = 1.0
     command_burst_seconds = 0.0
+    feedback_stale_seconds = 12.0
 
     def __init__(self) -> None:
         self._sdk: Any = None
         self._enabled_sides: tuple[str, ...] = ()
         self._connected = False
         self._states: dict[str, tuple[list[float], float] | None] = {}
+        self._lost_counters: dict[str, tuple[int, ...]] = {}
         self._targets: dict[str, list[float]] = {}
         self._command_active: dict[str, bool] = {}
         self._error = ""
@@ -160,6 +168,7 @@ class _InspireAdapterBase:
         )
         self._sdk.initialize()
         self._states = {side: None for side in self._enabled_sides}
+        self._lost_counters = {}
         self._targets = {side: [0.0] * HAND_DOF for side in self._enabled_sides}
         self._command_active = {side: False for side in self._enabled_sides}
         self._connected = True
@@ -179,20 +188,31 @@ class _InspireAdapterBase:
         self._connected = False
         self._enabled_sides = ()
         self._states.clear()
+        self._lost_counters.clear()
         self._targets.clear()
         self._command_active.clear()
         return {"ok": True, "message": f"因时 {self.model} DDS 通道已断开"}
 
     def status(self) -> dict[str, Any]:
         if self._connected:
-            self._read_states(timeout=0.0)
+            self._read_states(timeout=0.02)
+            now = time.time()
+            if any(
+                state is not None and now - state[1] >= self.feedback_stale_seconds
+                for state in self._states.values()
+            ):
+                # The Web console polls every five seconds. Retry briefly when a
+                # cached hand has gone stale so a narrow DDS sample window does
+                # not make a healthy serial bridge appear offline.
+                self._read_states(timeout=0.05)
+                self._read_states(timeout=0.05)
         now = time.time()
         hands = {}
         for side in self._enabled_sides:
             state = self._states.get(side)
             hands[side] = {
                 "enabled": True,
-                "online": state is not None and now - state[1] < 2.0,
+                "online": state is not None and now - state[1] < self.feedback_stale_seconds,
                 "positions": state[0][:] if state else None,
                 "targets": self._targets[side][:],
                 "command_active": self._command_active[side],
@@ -269,11 +289,20 @@ class _InspireAdapterBase:
             timestamp = time.time()
             offline = []
             for side, state in raw_states.items():
+                if state is None:
+                    cached = self._states.get(side)
+                    if cached is None or timestamp - cached[1] >= self.feedback_stale_seconds:
+                        offline.append(side)
+                    continue
                 lost = tuple(getattr(state, "lost", ())) if state is not None else ()
-                if state is not None and not any(lost):
+                previous_lost = self._lost_counters.get(side)
+                self._lost_counters[side] = lost
+                # Official inspire_h1 exposes cumulative serial failure counters.
+                # A non-zero but unchanged value means valid feedback has resumed.
+                if not any(lost) or lost == previous_lost:
                     self._states[side] = (self._from_hardware(state.angles), timestamp)
-                else:
-                    self._states[side] = None
+                cached = self._states.get(side)
+                if cached is None or timestamp - cached[1] >= self.feedback_stale_seconds:
                     offline.append(side)
             self._error = (
                 "因时串口未收到" + "、".join("左手" if side == "left" else "右手" for side in offline) + "反馈"

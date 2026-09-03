@@ -124,7 +124,25 @@ print("numpy", numpy.__version__)
 print("imports ok")
 PY
 ```
-安装 inspire:
+安装 Inspire DFX：
+
+全新 Ubuntu 22.04 设备推荐直接执行自动部署脚本：
+
+```bash
+cd /home/robot/eai-teleop-studio
+bash scripts/setup_inspire_dfx.sh
+```
+
+脚本会安装编译依赖，检测并按需安装 C++ 版 `unitree_sdk2`，克隆 `DFX_inspire_service`，幂等应用 Ubuntu 22 fmt 补丁，清除 CMake 缓存中的 Conda 路径，强制使用系统编译器、Boost、fmt 和 spdlog，并编译、检查 `inspire_h1`。已有依赖且只需重新编译时执行：
+
+```bash
+bash scripts/setup_inspire_dfx.sh --skip-deps
+```
+
+以下为对应的手工部署步骤：
+
+手工编译原生 C++ 组件前，应先退出 Conda 环境，并确认 `CONDA_PREFIX` 为空；否则 CMake 可能缓存 Conda 中的 Boost、fmt 或 spdlog：
+
 ```bash
 sudo apt update
 sudo apt install cmake -y \
@@ -150,23 +168,27 @@ cmake --build unitree_sdk2/build -j6
 sudo cmake --install unitree_sdk2/build
 sudo ldconfig
 ```
+- 全新设备安装
+```bash
+cd /home/robot/eai-teleop-studio
+bash scripts/setup_inspire_dfx.sh
+```
+
+- 已经有依赖的设备
+```bash
+cd /home/robot/eai-teleop-studio
+bash scripts/setup_inspire_dfx.sh --skip-deps
+```
 
 ```bash
 cd /home/robot
-git clone https://github.com/unitreerobotics/DFX_inspire_service.git
-
-# 第二次执行 git apply 会提示“补丁未应用”
-PROJECT_ROOT=/home/robot/eai-teleop-studio
-if ! grep -q 'find_package(fmt REQUIRED)' DFX_inspire_service/CMakeLists.txt; then
-  git -C DFX_inspire_service apply \
-    "$PROJECT_ROOT/patches/inspire_dfx_ubuntu22_fmt.patch"
-fi
-
-cmake -S DFX_inspire_service \
-  -B DFX_inspire_service/build \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build DFX_inspire_service/build --target inspire_h1 -j"$(nproc)"
 test -x /home/robot/DFX_inspire_service/build/inspire_h1
+```
+
+必须让 DFX 服务使用 Ubuntu 自带、与 `libspdlog-dev` 配套的 fmt。若 CMake 输出中的 `fmt_DIR` 指向 `/home/robot/miniconda3`，会混用 Conda fmt 与系统 spdlog，并出现 `basic_runtime is not a member of fmt`。可用以下命令确认：
+
+```bash
+grep '^fmt_DIR' DFX_inspire_service/build/CMakeCache.txt
 ```
 
 
@@ -271,6 +293,11 @@ openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 3650 \
 chmod 600 config/key.pem
 ```
 
+```bash
+cp config/key.pem config/cert.pem ~/.config/xr_teleoperate/
+
+chmod 600 ~/.config/xr_teleoperate/key.pem
+```
 
 
 
@@ -574,11 +601,24 @@ sudo bash scripts/install_autostart_services.sh xr-teleop-web.service h2-switch-
 
 ```bash
 sudo usermod -aG dialout robot
-sudo bash scripts/install_autostart_services.sh hand-web.service
+bash scripts/setup_inspire_dfx.sh
+sudo bash scripts/install_autostart_services.sh hand-web.service inspire-dfx.service can0.service
 sudo systemctl restart hand-web.service
 ```
 
-灵巧手服务还要求官方 `bc-stark-sdk` 安装在 `/home/robot/miniconda3/envs/teleop` 环境。视觉控制默认使用访问页面电脑的浏览器摄像头；远程 HTTP 下可通过 SSH 端口转发访问本机地址。Linux 串口权限、FT2232 双通道识别、Revo2 端口确认、视觉访问、首次部署和更新部署的完整步骤见 [`hand_web/README_zh-CN.md`](hand_web/README_zh-CN.md)。
+开启常用的几个服务器
+```bash
+cd /home/robot/eai-teleop-studio
+sudo usermod -aG dialout robot
+sudo bash scripts/install_autostart_services.sh teleimager-camera-capture.service xr-teleop-web.service hand-web.service inspire-dfx.service can0.service
+```
+
+```bash
+systemctl is-enabled brltty.service brltty-udev.service
+ls -l /dev/ttyUSB* /dev/serial/by-id /dev/serial/by-path 2>/dev/null
+```
+
+部署脚本默认永久屏蔽 Ubuntu 的 `brltty.service` 和 `brltty-udev.service`，避免 `1a86:7523` CH340 被识别为盲文设备后从 `ttyUSB0` 脱开。执行一次后对重启和 USB 重新插拔持续有效；确实需要盲文设备时使用 `bash scripts/setup_inspire_dfx.sh --keep-brltty`。灵巧手服务还要求官方 `bc-stark-sdk` 安装在 `/home/robot/miniconda3/envs/teleop` 环境。视觉控制默认使用访问页面电脑的浏览器摄像头；远程 HTTP 下可通过 SSH 端口转发访问本机地址。Linux 串口权限、FT2232 双通道识别、Revo2 端口确认、视觉访问、首次部署和更新部署的完整步骤见 [`hand_web/README_zh-CN.md`](hand_web/README_zh-CN.md)。
 
 查看状态：
 

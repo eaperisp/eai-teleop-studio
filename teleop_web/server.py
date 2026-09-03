@@ -44,6 +44,7 @@ from teleop.robot_control.end_effectors import (
 from teleop.utils.daily_file_logger import DailyFileLogger
 from teleop_web.training_prep import TrainingPrepError, TrainingPrepManager, training_data_root
 from hand_web.core.models import ValidationError as HandValidationError
+from hand_web.core.pose_store import PoseStore
 from hand_web.core.service import HandControlService
 
 try:
@@ -1316,6 +1317,7 @@ class DamiaoMotorDebug:
         self.last_error = ""
         self.last_frame: dict[str, Any] | None = None
         self.last_feedback: dict[str, Any] | None = None
+        self.last_rejected_feedback: dict[str, Any] | None = None
         self.motion: dict[str, Any] = {"running": False}
         self.updated_at = ""
         self._lock = threading.RLock()
@@ -1333,6 +1335,7 @@ class DamiaoMotorDebug:
                 "last_error": self.last_error,
                 "last_frame": self.last_frame,
                 "last_feedback": self.last_feedback,
+                "last_rejected_feedback": self.last_rejected_feedback,
                 "motion": dict(self.motion),
                 "config": dict(self.config),
                 "config_file": str(self.config_file),
@@ -1358,15 +1361,17 @@ class DamiaoMotorDebug:
             if not hasattr(socket, "PF_CAN") or not hasattr(socket, "CAN_RAW"):
                 raise ValidationError("当前系统不支持 SocketCAN；请在 Linux 机器人/工控机上使用 can0/vcan0")
             self._ensure_can_device_up(parsed["can_device"])
-            if self._socket is not None and self.channel == parsed["can_device"]:
-                self.connected = True
-                self.last_action = "connect"
-                self._touch()
-                return self.state()
+            # A SocketCAN socket becomes stale after the interface or USB adapter is
+            # restarted. Rebind on every explicit connection request.
             self.close()
             try:
                 can_socket = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
                 can_socket.settimeout(0.01)
+                can_socket.setsockopt(
+                    getattr(socket, "SOL_CAN_RAW", 101),
+                    getattr(socket, "CAN_RAW_RECV_OWN_MSGS", 4),
+                    0,
+                )
                 can_socket.bind((parsed["can_device"],))
             except OSError as exc:
                 raise ValidationError(f"CAN 设备连接失败：{exc}") from exc
@@ -1412,7 +1417,10 @@ class DamiaoMotorDebug:
             self._send_frame(can_id, payload)
             self.last_action = action_name
             self.last_error = ""
-            self._read_feedback(parsed)
+            feedback_received = self._read_feedback(parsed)
+            if action_name == "enable" and not feedback_received:
+                self._disable_after_feedback_timeout(parsed)
+                raise ValidationError(self.last_error)
             self._touch()
             return self.state()
 
@@ -1568,8 +1576,12 @@ class DamiaoMotorDebug:
         duration_s = float(config["duration_s"])
         control_hz = float(config["control_hz"])
         can_id = int(config["can_id"])
+        self.last_feedback = None
+        self.last_rejected_feedback = None
         self._send_frame(can_id, self.ENABLE_FRAME)
-        self._read_feedback(config)
+        if not self._read_feedback(config):
+            self._disable_after_feedback_timeout(config)
+            raise ValidationError(self.last_error)
         hold_position = (self.last_feedback or {}).get("position_rad", 0.0)
         self._send_frame(can_id, self._make_mit_data(config, signed_speed, position=hold_position, kp=0.0))
         now = time.time()
@@ -1729,26 +1741,39 @@ class DamiaoMotorDebug:
             "sent_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
 
-    def _read_feedback(self, config: dict[str, Any]) -> None:
+    def _read_feedback(self, config: dict[str, Any]) -> bool:
         if self._socket is None:
-            return
-        try:
-            raw = self._socket.recv(self.CAN_FRAME_SIZE)
-        except TimeoutError:
-            return
-        except OSError:
-            return
-        if len(raw) < self.CAN_FRAME_SIZE:
-            return
-        can_id, dlc, data = struct.unpack(self.CAN_FRAME_FORMAT, raw[: self.CAN_FRAME_SIZE])
-        payload = data[:dlc]
-        feedback: dict[str, Any] = {
-            "can_id": f"0x{can_id:X}",
-            "dlc": dlc,
-            "data": " ".join(f"{byte:02X}" for byte in payload),
-            "received_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        }
-        if dlc >= 8:
+            return False
+        expected_motor_id = int(config["can_id"]) & 0x0F
+        for _ in range(8):
+            try:
+                raw = self._socket.recv(self.CAN_FRAME_SIZE)
+            except TimeoutError:
+                return False
+            except OSError:
+                return False
+            if len(raw) < self.CAN_FRAME_SIZE:
+                continue
+            can_id, dlc, data = struct.unpack(self.CAN_FRAME_FORMAT, raw[: self.CAN_FRAME_SIZE])
+            payload = data[:dlc]
+            received_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            if dlc < 8 or (payload[0] & 0x0F) != expected_motor_id:
+                self.last_rejected_feedback = {
+                    "can_id": f"0x{can_id:X}",
+                    "dlc": dlc,
+                    "data": " ".join(f"{byte:02X}" for byte in payload),
+                    "motor_id": (payload[0] & 0x0F) if payload else None,
+                    "expected_motor_id": expected_motor_id,
+                    "reason": "unexpected_motor_id" if payload else "empty_frame",
+                    "received_at": received_at,
+                }
+                continue
+            feedback: dict[str, Any] = {
+                "can_id": f"0x{can_id:X}",
+                "dlc": dlc,
+                "data": " ".join(f"{byte:02X}" for byte in payload),
+                "received_at": received_at,
+            }
             pos_raw = (payload[1] << 8) | payload[2]
             vel_raw = (payload[3] << 4) | (payload[4] >> 4)
             torque_raw = ((payload[4] & 0x0F) << 8) | payload[5]
@@ -1763,7 +1788,19 @@ class DamiaoMotorDebug:
                     "motor_temp_c": payload[7],
                 }
             )
-        self.last_feedback = feedback
+            self.last_feedback = feedback
+            return True
+        return False
+
+    def _disable_after_feedback_timeout(self, config: dict[str, Any]) -> None:
+        self.last_error = (
+            f"CAN 指令已发送，但未收到电机 ID {config['can_id']} 的有效反馈；"
+            "请检查电机供电、CAN_H/CAN_L、公共地、终端电阻、波特率和电机 ID"
+        )
+        try:
+            self._send_frame(int(config["can_id"]), self.DISABLE_FRAME)
+        except (OSError, ValidationError):
+            pass
 
     @staticmethod
     def _float_to_uint(value: float, minimum: float, maximum: float, bits: int) -> int:
@@ -1787,6 +1824,7 @@ class HandDebugService:
 
     def __init__(self, config_file: Path, logger: DailyFileLogger) -> None:
         self.service = HandControlService(config_file, logger=logger)
+        self.poses = PoseStore(config_file.with_name("poses.json"), logger=logger)
         self.updated_at = ""
 
     def state(self) -> dict[str, Any]:
@@ -1825,6 +1863,23 @@ class HandDebugService:
         result = self.service.stop(source="manual")
         self._touch()
         return {"result": result, **self.state()}
+
+    def list_poses(self, device_id: Any) -> dict[str, Any]:
+        return self.poses.list(str(device_id or ""))
+
+    def save_pose(self, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValidationError("姿态参数格式不正确")
+        result = self.poses.save(payload)
+        self._touch()
+        return result
+
+    def delete_pose(self, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValidationError("姿态参数格式不正确")
+        result = self.poses.delete(payload)
+        self._touch()
+        return result
 
     def close(self) -> None:
         self.service.close()
@@ -5793,6 +5848,10 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/state":
                 self._json(self.manager.state())
                 return
+            if path == "/api/hand/poses":
+                query = parse_qs(parsed.query)
+                self._json(self.manager.hand_debug.list_poses((query.get("device_id") or [""])[0]))
+                return
             if path == "/api/tasks/file":
                 query = parse_qs(parsed.query)
                 try:
@@ -5865,7 +5924,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
-        except ValidationError as exc:
+        except (ValidationError, HandValidationError) as exc:
             error = str(exc)
             self.manager.logger.write(
                 "warning",
@@ -5970,6 +6029,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 result = {"hand_debug": self.manager.hand_debug.command(payload)}
             elif path == "/api/hand/stop":
                 result = {"hand_debug": self.manager.hand_debug.stop()}
+            elif path == "/api/hand/poses/save":
+                result = self.manager.hand_debug.save_pose(payload)
+            elif path == "/api/hand/poses/delete":
+                result = self.manager.hand_debug.delete_pose(payload)
             elif path == "/api/start":
                 result = self.manager.start_task(payload.get("task_id"))
             elif path == "/api/control":

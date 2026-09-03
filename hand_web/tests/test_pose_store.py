@@ -22,6 +22,16 @@ class PoseStoreTests(unittest.TestCase):
         self.assertEqual([pose["id"] for pose in result["poses"]], ["open", "half", "close"])
         self.assertFalse(self.path.exists())
 
+    def test_inspire_defaults_include_index_finger_extended(self):
+        result = self.store.list("inspire_dfx")
+        self.assertEqual(
+            [pose["id"] for pose in result["poses"]],
+            ["open", "half", "close", "index_finger_extended"],
+        )
+        self.assertEqual(result["poses"][-1]["description_zh"], "食指伸出")
+        self.assertEqual(result["poses"][-1]["positions"], [0.0, 0.11, 0.0, 1.0, 1.0, 1.0])
+        self.assertFalse(self.path.exists())
+
     def test_create_update_delete_and_reload(self):
         created = self.store.save({
             "device_id": "brainco_revo2",

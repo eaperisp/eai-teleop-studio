@@ -404,16 +404,19 @@ ls -l /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
 ls -l /dev/serial/by-id /dev/serial/by-path 2>/dev/null
 ```
 
-Ubuntu 22.04 可能将 `1a86:7523` CH340 错认成盲文设备。若 `lsusb` 能看到 CH340，但没有 `/dev/ttyUSB*`，并且内核日志包含 `brltty` 和 `converter now disconnected`，执行：
+Ubuntu 22.04 可能将 `1a86:7523` CH340 错认成盲文设备。项目的 `scripts/setup_inspire_dfx.sh` 默认永久屏蔽相关服务；新设备正常执行一次部署脚本即可。若机器确实连接盲文设备，可用 `--keep-brltty` 跳过该处理。
+
+若 `lsusb` 能看到 CH340，但没有 `/dev/ttyUSB*`，并且内核日志包含 `brltty` 和 `converter now disconnected`，执行：
 
 ```bash
 journalctl -k -b --no-pager | grep -iE 'ch341|ttyUSB|brltty'
-sudo systemctl disable --now brltty.service brltty-udev.service
-sudo systemctl mask brltty.service brltty-udev.service
-sudo apt purge -y brltty
+sudo systemctl mask --now brltty.service brltty-udev.service
+systemctl is-enabled brltty.service brltty-udev.service
 ```
 
-完成后重新插拔 USB 转串口，再次确认出现 `/dev/ttyUSB0`。CH340 通常没有 USB 序列号，因此 `/dev/serial/by-id` 可能为空；此时优先使用 `/dev/serial/by-path`，最后才使用可能随插拔顺序变化的 `/dev/ttyUSB0`。
+输出应为两个 `masked`。该设置保存在 `/etc/systemd/system`，重启和重新插拔后仍然有效，不需要每次执行。首次修复时重新插拔 USB 转串口或重启系统，再次确认出现 `/dev/ttyUSB0`；只有需要恢复盲文设备支持时才执行 `sudo systemctl unmask brltty.service brltty-udev.service`。
+
+CH340 通常没有 USB 序列号，因此 `/dev/serial/by-id` 可能为空；此时优先使用 `/dev/serial/by-path`，最后才使用可能随插拔顺序变化的 `/dev/ttyUSB0`。
 
 安装编译依赖：
 
@@ -446,19 +449,13 @@ cd /home/robot
 git clone https://github.com/unitreerobotics/DFX_inspire_service.git
 
 PROJECT_ROOT=/home/robot/eai-teleop-studio
-for DFX_PATCH in \
-  "$PROJECT_ROOT/patches/inspire_dfx_ubuntu22_fmt.patch" \
-  "$PROJECT_ROOT/patches/inspire_dfx_configurable_ids.patch"; do
-  if git -C DFX_inspire_service apply --check "$DFX_PATCH" 2>/dev/null; then
-    git -C DFX_inspire_service apply "$DFX_PATCH"
-    echo "Applied $DFX_PATCH"
-  elif git -C DFX_inspire_service apply --reverse --check "$DFX_PATCH" 2>/dev/null; then
-    echo "Already applied; skipping $DFX_PATCH"
-  else
-    echo "ERROR: DFX source is incompatible with $DFX_PATCH" >&2
-    exit 1
-  fi
-done
+DFX_PATCH="$PROJECT_ROOT/patches/inspire_dfx_ubuntu22_fmt.patch"
+if git -C DFX_inspire_service apply --check "$DFX_PATCH" 2>/dev/null; then
+  git -C DFX_inspire_service apply "$DFX_PATCH"
+elif ! git -C DFX_inspire_service apply --reverse --check "$DFX_PATCH" 2>/dev/null; then
+  echo "ERROR: DFX source is incompatible with $DFX_PATCH" >&2
+  exit 1
+fi
 
 cmake -S DFX_inspire_service \
   -B DFX_inspire_service/build \
@@ -467,7 +464,7 @@ cmake --build DFX_inspire_service/build --target inspire_h1 -j"$(nproc)"
 test -x /home/robot/DFX_inspire_service/build/inspire_h1
 ```
 
-Ubuntu 22.04 的 `spdlog` 使用外部 `fmt`。若链接阶段出现大量 `undefined reference to fmt::v8`，说明官方 DFX 的 CMake 没有链接这两个库；第一个补丁会增加 `find_package(fmt/spdlog)` 及 `spdlog::spdlog`、`fmt::fmt` 链接。第二个补丁为官方程序增加可配置的左右手串口 ID，并在成功读取后清零 DDS `lost`，避免断开的手继续显示旧关节值。补丁不是重复应用型操作：直接执行第二次 `git apply` 会显示“补丁未应用”，表示目标改动已经存在，并不表示编译失败。上面的三态判断可以安全重复执行。
+Ubuntu 22.04 的 `spdlog` 使用外部 `fmt`。若链接阶段出现大量 `undefined reference to fmt::v8`，说明官方 DFX 的 CMake 没有链接这两个库；兼容补丁只调整构建依赖，不修改 DFX 的串口协议和运行逻辑。启动时仅使用官方支持的 `serial`、`network` 和 `namespace` 参数。
 
 ```bash
 grep -nE 'find_package\((fmt|spdlog)|spdlog::spdlog|fmt::fmt' \
@@ -506,27 +503,12 @@ vi config/inspire_dfx.env
 DDS_IFACE=enp86s0
 HAND_SERIAL=/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
 INSPIRE_DFX_SERVICE=/home/robot/DFX_inspire_service/build/inspire_h1
-INSPIRE_DFX_RIGHT_ID=1
-INSPIRE_DFX_LEFT_ID=2
+INSPIRE_DFX_NAMESPACE=inspire
 ```
 
-设备 ID 与物理安装侧必须按实际设备配置，不能仅根据默认值判断。`0` 表示禁用该侧：
+官方 `inspire_h1` 固定使用右手串口 ID `1`、左手串口 ID `2`。单个服务可控制同一串口总线上的这两个 ID。不要向官方程序传入 `--right-id` 或 `--left-id`，其当前版本不支持这些参数。
 
-```text
-# 单只物理左手，串口应答 ID 1
-INSPIRE_DFX_RIGHT_ID=0
-INSPIRE_DFX_LEFT_ID=1
-
-# 单只物理右手，串口应答 ID 1
-INSPIRE_DFX_RIGHT_ID=1
-INSPIRE_DFX_LEFT_ID=0
-
-# 官方默认双手
-INSPIRE_DFX_RIGHT_ID=1
-INSPIRE_DFX_LEFT_ID=2
-```
-
-桥接程序会把 `INSPIRE_DFX_RIGHT_ID` 发布到 DDS 关节 `0-5`，把 `INSPIRE_DFX_LEFT_ID` 发布到 `6-11`。因此物理左手即使使用 ID `1`，也必须配置为 `LEFT_ID=1`；否则网页选择左手时会把指令发给错误的串口 ID。
+两只手分别连接两个 USB 串口时，应启动两个独立服务实例，每个实例配置不同的稳定串口路径与 DDS namespace，再由本项目适配层映射为逻辑左手和右手。不要让两个实例共用 `rt/inspire/*` 主题，否则两路状态会互相覆盖。
 
 安装前使用与 systemd 相同的 `robot` 用户做预检。手工启动时需要先加载环境文件；`--dry-run` 只解析程序、串口和网卡，不会发送动作：
 
@@ -550,7 +532,7 @@ sudo systemctl stop inspire-dfx.service hand-web.service
   --ids 1 2 3 4 5 6 7 8 9 10
 ```
 
-官方默认右手为 ID `1`，左手为 ID `2`，但设备烧录 ID 可能与物理安装侧不同，应以探测结果和实物安装侧填写 `INSPIRE_DFX_RIGHT_ID/LEFT_ID`。出现 `online` 才表示灵巧手本体返回了有效位置帧；只有 `/dev/ttyUSB*` 或 CH340 出现在 `lsusb` 中，仅能证明 USB 转串口板在线。所有 ID 都显示 `offline` 时，应检查灵巧手供电、串口/RS485 线束、A/B 极性、手型与通信接口，不要继续从 Web 端反复发送动作。检查完成后重新启动：
+官方默认右手为 ID `1`、左手为 ID `2`，设备烧录 ID 应通过只读探测确认。出现 `online` 才表示灵巧手本体返回了有效位置帧；只有 `/dev/ttyUSB*` 或 CH340 出现在 `lsusb` 中，仅能证明 USB 转串口板在线。所有 ID 都显示 `offline` 时，应检查灵巧手供电、串口/RS485 线束、A/B 极性、手型与通信接口，不要继续从 Web 端反复发送动作。检查完成后重新启动：
 
 设备在线但某个关节不动作时，增加 `--diagnostics` 读取六路关节的目标位置、实际位置、电流、状态、故障位和温度。该命令只读，不会发送动作或清除故障：
 

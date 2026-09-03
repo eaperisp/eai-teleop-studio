@@ -1,4 +1,5 @@
 import json
+import struct
 import tarfile
 import time
 import types
@@ -151,6 +152,58 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(restored.config["kd"], 4)
             self.assertEqual(restored.config["torque"], 2)
             self.assertEqual(restored.state()["config_file"], str(config_file))
+
+    def test_motor_connect_rebinds_existing_socket(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            motor = DamiaoMotorDebug(Path(temp_dir) / "motor.json")
+            old_socket = MagicMock()
+            new_socket = MagicMock()
+            motor._socket = old_socket
+            motor.channel = "can0"
+            motor.connected = True
+
+            with patch.object(motor, "_ensure_can_device_up"):
+                with patch("teleop_web.server.socket.PF_CAN", 29, create=True):
+                    with patch("teleop_web.server.socket.CAN_RAW", 1, create=True):
+                        with patch("teleop_web.server.socket.socket", return_value=new_socket):
+                            state = motor.connect({"canDevice": "can0"})
+
+            old_socket.close.assert_called_once()
+            new_socket.bind.assert_called_once_with(("can0",))
+            self.assertIs(motor._socket, new_socket)
+            self.assertTrue(state["connected"])
+
+    def test_motor_feedback_ignores_local_echo_with_wrong_motor_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            motor = DamiaoMotorDebug(Path(temp_dir) / "motor.json")
+            config = motor._validate_config({"canId": 1})
+            echo_payload = motor._make_mit_data(config, -5.0, kp=0.0)
+            valid_payload = bytes([0x11, 0x80, 0x00, 0x80, 0x08, 0x00, 30, 31])
+            motor._socket = MagicMock()
+            motor._socket.recv.side_effect = [
+                struct.pack(motor.CAN_FRAME_FORMAT, 1, 8, echo_payload),
+                struct.pack(motor.CAN_FRAME_FORMAT, 0, 8, valid_payload),
+            ]
+
+            self.assertTrue(motor._read_feedback(config))
+            self.assertEqual(motor.last_rejected_feedback["motor_id"], 15)
+            self.assertEqual(motor.last_feedback["motor_id"], 1)
+            self.assertEqual(motor.last_feedback["can_id"], "0x0")
+
+    def test_motor_feedback_reports_no_valid_frame_when_only_echo_arrives(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            motor = DamiaoMotorDebug(Path(temp_dir) / "motor.json")
+            config = motor._validate_config({"canId": 1})
+            echo_payload = motor._make_mit_data(config, -5.0, kp=0.0)
+            motor._socket = MagicMock()
+            motor._socket.recv.side_effect = [
+                struct.pack(motor.CAN_FRAME_FORMAT, 1, 8, echo_payload),
+                TimeoutError(),
+            ]
+
+            self.assertFalse(motor._read_feedback(config))
+            self.assertIsNone(motor.last_feedback)
+            self.assertEqual(motor.last_rejected_feedback["expected_motor_id"], 1)
 
     def test_hand_tracking_without_adapter_omits_end_effector_argument(self):
         device = validate_device({"input_mode": "hand", "ee": "none"})
